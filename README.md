@@ -1,0 +1,1 @@
+# Repository for PolyFrameNet, a polymer-specific MLIP for efficient, accurate MD simulation.
