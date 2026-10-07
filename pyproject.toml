@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frame_potential"
+version = "0.1.0"
+description = "Block-factored machine-learned interatomic potential for linear polymers."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "torch>=2.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# importlib mode: test files in different folders may share a basename.
+addopts = ["--import-mode=importlib", "-ra", "--strict-markers"]
+# An xfail that starts passing is a signal to investigate, not a free pass.
+xfail_strict = true
+markers = [
+    "slow: long-running checks (NVE drift, benchmarks); deselect with -m 'not slow'",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "NPY"]
