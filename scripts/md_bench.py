@@ -20,7 +20,7 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase.md.verlet import VelocityVerlet
 
 from frame_potential.batch import collate, radius_graph
-from frame_potential.builders import pe_melt_grown
+from frame_potential.builders import pe_melt_grown, tile
 from frame_potential.calculator import PolyFrameNetCalculator
 from frame_potential.topology import topology_from_geometry
 from frame_potential.train import load_model
@@ -96,6 +96,89 @@ def nve(calc, atoms, steps, dt_fs, T=450.0, seed=0, log_every=10):
     }
 
 
+def chain_observables(atoms, topo):
+    """Backbone torsion trans fraction, mean end-to-end distance, intermolecular C-C RDF.
+    Chains are unwrapped along their bonds (minimum image per C-C step)."""
+    pos = atoms.get_positions()
+    L = np.diag(np.asarray(atoms.cell))
+    chains = {}
+    for c in np.unique(topo.chain_of_atom):
+        carb = [a for a in np.nonzero((topo.chain_of_atom == c) & (topo.numbers == 6))[0]]
+        chains[c] = carb
+    tors, ree, unwrapped = [], [], {}
+    nbr = {i: [] for i in range(len(pos))}
+    for a, b in topo.bonds:
+        if topo.numbers[a] == 6 and topo.numbers[b] == 6:
+            nbr[a].append(b)
+            nbr[b].append(a)
+    for c, carb in chains.items():
+        start = [a for a in carb if len(nbr[a]) == 1][0]
+        order, prev = [start], -1
+        while True:
+            nxt = [x for x in nbr[order[-1]] if x != prev]
+            if not nxt:
+                break
+            prev = order[-1]
+            order.append(nxt[0])
+        X = [pos[order[0]]]
+        for a in order[1:]:
+            d = pos[a] - X[-1]
+            d -= np.round(d / L) * L
+            X.append(X[-1] + d)
+        X = np.asarray(X)
+        unwrapped[c] = X
+        ree.append(np.linalg.norm(X[-1] - X[0]))
+        for k in range(len(X) - 3):
+            b1, b2, b3 = X[k + 1] - X[k], X[k + 2] - X[k + 1], X[k + 3] - X[k + 2]
+            n1, n2 = np.cross(b1, b2), np.cross(b2, b3)
+            cosphi = np.dot(n1, n2) / np.linalg.norm(n1) / np.linalg.norm(n2)
+            tors.append(np.degrees(np.arccos(np.clip(cosphi, -1, 1))))
+    tors = np.asarray(tors)
+    C = np.nonzero(topo.numbers == 6)[0]
+    ch = topo.chain_of_atom[C]
+    d = pos[C][:, None] - pos[C][None]
+    d -= np.round(d / L) * L
+    r = np.linalg.norm(d, axis=-1)[ch[:, None] != ch[None]]
+    edges = np.linspace(0, min(L) / 2, 61)
+    hist, _ = np.histogram(r, bins=edges)
+    return {"trans_fraction": float(np.mean(tors > 120)), "mean_ree_A": float(np.mean(ree)),
+            "rdf_counts": hist.tolist(), "rdf_edges": edges.tolist()}
+
+
+def nvt_observables(calc, atoms, steps, dt_fs=0.5, T=450.0, seed=0, every=20):
+    from ase.md.langevin import Langevin
+
+    atoms = atoms.copy()
+    atoms.calc = calc
+    topo = topology_from_geometry(atoms.numbers, atoms.positions, np.asarray(atoms.cell))
+    MaxwellBoltzmannDistribution(atoms, temperature_K=T, rng=np.random.default_rng(seed))
+    dyn = Langevin(atoms, dt_fs * units.fs, temperature_K=T, friction=0.01 / units.fs,
+                   rng=np.random.default_rng(seed))
+    samples, temps = [], []
+
+    def sample():
+        if dyn.nsteps >= steps // 2:  # second half only
+            samples.append(chain_observables(atoms, topo))
+        temps.append(atoms.get_temperature())
+
+    dyn.attach(sample, interval=every)
+    ok = True
+    try:
+        dyn.run(steps)
+    except Exception as exc:
+        print("NVT failed:", exc)
+        ok = False
+    if not samples:
+        return {"ok": False}
+    return {
+        "ok": ok, "steps": int(dyn.nsteps), "T_mean": float(np.mean(temps)),
+        "trans_fraction": float(np.mean([s["trans_fraction"] for s in samples])),
+        "mean_ree_A": float(np.mean([s["mean_ree_A"] for s in samples])),
+        "rdf_counts": np.mean([s["rdf_counts"] for s in samples], 0).tolist(),
+        "rdf_edges": samples[0]["rdf_edges"],
+    }
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--ours", type=pathlib.Path, required=True)
@@ -103,14 +186,17 @@ def main():
     p.add_argument("--out", type=pathlib.Path, required=True)
     p.add_argument("--nve-steps", type=int, default=4000)
     p.add_argument("--dt", type=float, default=0.5)
+    p.add_argument("--nvt-steps", type=int, default=4000)
     a = p.parse_args()
     from mace.calculators import MACECalculator
 
     ours = PolyFrameNetCalculator(load_model(a.ours, "cuda", torch.float32), "cuda")
     mace = MACECalculator(model_paths=str(a.mace), device="cuda", default_dtype="float32")
     res = {"speed": [], "nve": {}}
-    for n_chains, n_c in [(4, 40), (16, 40), (64, 40), (128, 40)]:
-        atoms = melt_atoms(n_chains, n_c, 0.50, seed=1)
+    base = melt_atoms(8, 40, 0.50, seed=1)
+    for reps in (1, 2, 3):
+        z, p, c = tile(base.numbers, base.positions, np.asarray(base.cell), reps)
+        atoms = Atoms(numbers=z, positions=p, cell=c, pbc=True)
         ours.topo = None
         row = {"n_atoms": len(atoms), "ours_s": time_calc(ours, atoms),
                "ours_nl_s": time_neighbor_list(atoms, ours.model.cutoff)}
@@ -133,6 +219,13 @@ def main():
         summary = {k: v for k, v in r.items() if not k.startswith(("trace", "final"))}
         print(name, summary, flush=True)
         res["nve"][name] = r
+    res["nvt"] = {}
+    for name, calc in (("ours", ours), ("mace", mace)):
+        if name == "ours":
+            ours.topo = None
+        r = nvt_observables(calc, atoms, a.nvt_steps)
+        print(name, {k: v for k, v in r.items() if not k.startswith("rdf")}, flush=True)
+        res["nvt"][name] = r
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / "md_bench.json").write_text(json.dumps(res))
 

@@ -40,7 +40,7 @@ def label_end(ax, x, y, text, color):
 
 def main(runs: pathlib.Path, out: pathlib.Path):
     out.mkdir(parents=True, exist_ok=True)
-    hist = json.loads((runs / "pfn_main" / "history.json").read_text())
+    hist = json.loads((runs / "pfn_final" / "history.json").read_text())
     mc = mace_curve(runs / "mace_main.log")
 
     fig, axes = plt.subplots(1, 2, figsize=(9, 3.4))

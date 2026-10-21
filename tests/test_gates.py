@@ -184,3 +184,26 @@ def test_radius_graph_multi_structure_batch():
         zip(v[0].tolist(), v[1].tolist(), strict=True)
     )
     assert bool((b.struct[a[0]] == b.struct[a[1]]).all())
+
+
+@pytest.fixture(scope="module")
+def model_all_pairs():
+    """The configuration trained for the headline result: Stage 4 keeps every pair."""
+    torch.manual_seed(2)
+    return PolyFrameNet(cutoff=4.5, exclude_hops=-1).double().eval()
+
+
+def test_all_pairs_rotation_permutation_wrap(model_all_pairs, cluster, melt, rng):
+    f = gates.make_energy_fn(model_all_pairs)
+    z, p = cluster
+    assert gates.rotation_translation_error(f, z, p, None, rng) < 1e-9
+    assert gates.permutation_error(f, z, p, None, rng) < 1e-9
+    z, p, cell = melt
+    assert gates.rotation_translation_error(f, z, p, cell, rng) < 1e-9
+    assert gates.permutation_error(f, z, p, cell, rng) < 1e-9
+    assert gates.wrap_error(f, z, p, cell, rng) < 1e-9
+
+
+def test_all_pairs_finite_difference(model_all_pairs, melt):
+    z, p, cell = melt
+    assert gates.finite_difference_error(model_all_pairs, z, p, cell, h=1e-5) < 1e-8

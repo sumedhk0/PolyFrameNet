@@ -12,12 +12,19 @@ dependencies = [
     "numpy>=2.0",
     "scipy>=1.13",
     "torch>=2.4",
+    "ase>=3.23",
+    "vesin-torch>=0.6",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+]
+bench = [
+    "duckdb>=1.0",
+    "mace-torch>=0.3.16",
+    "matplotlib>=3.8",
 ]
 
 [tool.setuptools.packages.find]
