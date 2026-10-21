@@ -135,6 +135,12 @@ class BlockEncoder(nn.Module):
              self.n * d_atom + d_block]
         )
         self.group = GROUPS[btype]
+        self.register_buffer(
+            "perms", torch.tensor([pm for _, pm in self.group]), persistent=False
+        )  # (G, n)
+        self.register_buffer(
+            "variants", torch.tensor([v for v, _ in self.group]), persistent=False
+        )  # (G,)
         self.register_buffer("triu", torch.triu_indices(self.n, self.n, 1), persistent=False)
 
     def forward(self, Xt: torch.Tensor, species: torch.Tensor, F: torch.Tensor, o: torch.Tensor):
@@ -148,17 +154,21 @@ class BlockEncoder(nn.Module):
         # (cdist has no double backward, which force training needs.)
         dv = Xt[:, :, None, :] - Xt[:, None, :, :]
         D = gaussians(torch.sqrt((dv * dv).sum(-1) + 1e-12), 0.8, 3.2, self.n_rbf)
-        h_acc = Xt.new_zeros(B, self.n, self.d_atom)
-        H_acc = Xt.new_zeros(B, self.d_block)
-        for v, perm in self.group:
-            Dp = D[:, perm][:, :, perm][:, self.triu[0], self.triu[1]].reshape(B, -1)
-            x = torch.cat([coords[v][:, perm].reshape(B, -1), emb[:, perm].reshape(B, -1), Dp], -1)
-            y = self.net(x)
-            ha = y[:, : self.n * self.d_atom].reshape(B, self.n, self.d_atom)
-            h_acc[:, perm] += ha  # un-permute: output slot s belongs to atom perm[s]
-            H_acc += y[:, self.n * self.d_atom :]
-        g = len(self.group)
-        return h_acc / g, H_acc / g
+        # All group elements in one batched MLP call: (G, B, ...) -> (G*B, ...).
+        G = self.perms.shape[0]
+        P = self.perms
+        cs = torch.stack(coords, 0)[self.variants]  # (G, B, n, 3) frame variant per element
+        cs = torch.gather(cs, 2, P[:, None, :, None].expand(G, B, self.n, 3))
+        es = emb[:, P].permute(1, 0, 2, 3)  # (G, B, n, 8)
+        Dp = D[:, P[:, :, None], P[:, None, :]]  # (B, G, n, n, K)
+        Dp = Dp[:, :, self.triu[0], self.triu[1]].permute(1, 0, 2, 3)  # (G, B, pairs, K)
+        x = torch.cat([cs.reshape(G, B, -1), es.reshape(G, B, -1), Dp.reshape(G, B, -1)], -1)
+        y = self.net(x)  # (G, B, out)
+        ha = y[..., : self.n * self.d_atom].reshape(G, B, self.n, self.d_atom)
+        # un-permute: output slot s of element g belongs to atom P[g, s]
+        inv = torch.argsort(P, dim=1)  # (G, n)
+        ha = torch.gather(ha, 2, inv[:, None, :, None].expand(G, B, self.n, self.d_atom))
+        return ha.mean(0), y[..., self.n * self.d_atom :].mean(0)
 
 
 # ----------------------------------------------------------------------------- Stage 3
@@ -187,6 +197,38 @@ class BondedLayer(nn.Module):
         m = 0.5 * m
         agg = torch.zeros_like(H).index_add_(0, dst, m)
         return H + self.upd(torch.cat([H, agg], -1))
+
+
+# ----------------------------------------------------------------------------- valence prior
+
+
+class Valence(nn.Module):
+    """Learnable valence term on topological pairs (Urey-Bradley style): bonds (1-2),
+    angles via 1-3 distances, torsion-sensitive 1-4 distances. One shared MLP of a fine
+    Gaussian expansion of r, conditioned on the pair class (bond distance x species pair).
+    Stiff covalent terms are then one-dimensional functions the optimiser finds at once,
+    instead of features buried in the block MLP. Pair energy is split equally onto its two
+    atoms. Smooth (the pair set is fixed by topology, never enters or leaves)."""
+
+    def __init__(self, n_rbf: int = 48, hidden: int = 64, n_class: int = 9):
+        super().__init__()
+        self.n_rbf = n_rbf
+        self.n_class = n_class
+        self.net = mlp([n_rbf + n_class, hidden, hidden, 1])
+
+    def forward(self, batch: Batch, pos: torch.Tensor) -> torch.Tensor:
+        i, j = batch.val_pairs[:, 0], batch.val_pairs[:, 1]
+        v = pos[j] - pos[i]
+        if batch.cell is not None:
+            v = _mic_shift(v, batch.cell[batch.struct[i]])
+        r = torch.sqrt((v * v).sum(-1) + 1e-12)
+        x = torch.cat(
+            [gaussians(r, 0.8, 4.4, self.n_rbf),
+             nn.functional.one_hot(batch.val_class, self.n_class).to(pos.dtype)], -1
+        )
+        e = self.net(x).squeeze(-1)
+        out = pos.new_zeros(pos.shape[0])
+        return out.index_add(0, i, 0.5 * e).index_add(0, j, 0.5 * e)
 
 
 # ----------------------------------------------------------------------------- Stage 4
@@ -305,6 +347,7 @@ class PolyFrameNet(nn.Module):
         self.species_emb = nn.Embedding(2, 16)
         self.readout = mlp([d_ctx + self.nonbonded.d_out + 16, hidden, hidden, 1])
         self.long_range = long_range
+        self.valence = Valence()
         # Per-element reference energies and scale; set from training data (fit_reference).
         self.register_buffer("e0", torch.zeros(2))  # [H, C] eV
         self.register_buffer("scale", torch.ones(()))
@@ -396,7 +439,7 @@ class PolyFrameNet(nn.Module):
             Fa = Fb[v][batch.block_of_atom]
             nb = self.nonbonded.project(M0, M1, M2, Fa)
             eps = eps + self.readout(torch.cat([x_atom, nb, sp], -1)).squeeze(-1)
-        eps = 0.5 * eps * self.scale + self.e0[species]
+        eps = (0.5 * eps + self.valence(batch, pos)) * self.scale + self.e0[species]
         E = pos.new_zeros(batch.n_struct, dtype=dt).index_add_(0, batch.struct, eps)
         if self.long_range:
             E = E + self.long_range_energy(batch, x_atom)

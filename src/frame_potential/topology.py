@@ -74,7 +74,37 @@ def _mic(d: np.ndarray, cell: np.ndarray | None) -> np.ndarray:
 
 
 def infer_bonds(numbers: np.ndarray, positions: np.ndarray, cell: np.ndarray | None = None):
-    """Covalent bonds from distances, read once at t=0. Brute force; N is small at setup."""
+    """Covalent bonds from distances, read once at t=0 (KD-tree, O(N log N)).
+
+    Periodic cells must be orthorhombic here (cKDTree boxsize); triclinic cells fall back
+    to brute-force minimum image, fine for the small boxes used in tests."""
+    from scipy.spatial import cKDTree
+
+    numbers = np.asarray(numbers)
+    positions = np.asarray(positions, dtype=np.float64)
+    if cell is not None and not np.allclose(cell, np.diag(np.diag(cell))):
+        return _infer_bonds_brute(numbers, positions, cell)
+    if cell is None:
+        tree = cKDTree(positions)
+    else:
+        L = np.diag(cell)
+        tree = cKDTree(np.mod(positions, L), boxsize=L)
+    pairs = tree.query_pairs(CC_MAX, output_type="ndarray")
+    if not len(pairs):
+        return np.zeros((0, 2), np.int64)
+    i, j = pairs[:, 0], pairs[:, 1]
+    d = positions[j] - positions[i]
+    d = _mic(d, cell)
+    r = np.linalg.norm(d, axis=1)
+    zi, zj = numbers[i], numbers[j]
+    cc = (zi == 6) & (zj == 6) & (r < CC_MAX)
+    ch = (((zi == 6) & (zj == 1)) | ((zi == 1) & (zj == 6))) & (r < CH_MAX)
+    keep = cc | ch
+    out = np.stack([np.minimum(i, j), np.maximum(i, j)], 1)[keep]
+    return out[np.lexsort((out[:, 1], out[:, 0]))].astype(np.int64)
+
+
+def _infer_bonds_brute(numbers, positions, cell):
     n = len(numbers)
     d = positions[None, :, :] - positions[:, None, :]
     if cell is not None:
@@ -231,3 +261,23 @@ def bond_distances(topo: Topology, max_d: int) -> dict[tuple[int, int], int]:
             if v > s:
                 out[(s, v)] = d
     return out
+
+
+def valence_pairs(topo: Topology, max_d: int = 3):
+    """Topological pairs 1-2, 1-3, 1-4 (bond distance d = 1..max_d) with a class id
+    (d - 1) * 3 + species pair (0 HH, 1 CH, 2 CC). Cached on the topology object: it is
+    integer bookkeeping, fixed for a non-reactive system."""
+    cached = getattr(topo, "_valence", None)
+    if cached is not None and cached[2] == max_d:
+        return cached[0], cached[1]
+    dist = bond_distances(topo, max_d)
+    if dist:
+        pairs = np.asarray(list(dist.keys()), dtype=np.int64)
+        d = np.asarray(list(dist.values()), dtype=np.int64)
+    else:
+        pairs = np.zeros((0, 2), np.int64)
+        d = np.zeros(0, np.int64)
+    sp = (topo.numbers[pairs[:, 0]] == 6).astype(np.int64) + (topo.numbers[pairs[:, 1]] == 6)
+    cls = (d - 1) * 3 + sp
+    topo._valence = (pairs, cls, max_d)
+    return pairs, cls

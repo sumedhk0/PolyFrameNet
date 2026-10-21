@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .topology import END, MID, Topology
+from .topology import END, MID, Topology, valence_pairs
 
 
 @dataclass
@@ -32,6 +32,8 @@ class Batch:
     block_ids: dict[int, torch.Tensor]  # type -> (B_t,) global block ids
     block_edges: torch.Tensor  # (E_bb, 2)
     block_edges2: torch.Tensor  # (E_bb2, 2) second-neighbour block pairs
+    val_pairs: torch.Tensor  # (P, 2) topological 1-2 / 1-3 / 1-4 pairs
+    val_class: torch.Tensor  # (P,)
     block_of_atom: torch.Tensor  # (N,)
     # Targets (optional)
     energy: torch.Tensor | None = None  # (S,)
@@ -63,6 +65,8 @@ class Batch:
             block_ids={k: mv(v) for k, v in self.block_ids.items()},
             block_edges=mv(self.block_edges),
             block_edges2=mv(self.block_edges2),
+            val_pairs=mv(self.val_pairs),
+            val_class=mv(self.val_class),
             block_of_atom=mv(self.block_of_atom),
             energy=mv(self.energy),
             forces=mv(self.forces),
@@ -81,6 +85,7 @@ def collate(
     c_off = 0
     numbers, pos, struct = [], [], []
     btype, bstruct, bchain, bpos, bedges, bedges2, boa = [], [], [], [], [], [], []
+    vpairs, vcls = [], []
     batoms = {MID: [], END: []}
     bids = {MID: [], END: []}
     for s, (t, r) in enumerate(zip(topos, positions, strict=True)):
@@ -93,6 +98,9 @@ def collate(
         bpos.append(t.block_pos)
         bedges.append(t.block_edges + b_off)
         bedges2.append(t.block_edges2 + b_off)
+        vp, vc = valence_pairs(t)
+        vpairs.append(vp + a_off)
+        vcls.append(vc)
         boa.append(t.block_of_atom + b_off)
         for k in (MID, END):
             batoms[k].append(t.block_atoms[k] + a_off)
@@ -121,6 +129,8 @@ def collate(
         block_ids={k: cat(v) for k, v in bids.items()},
         block_edges=torch.as_tensor(np.concatenate(bedges), dtype=torch.long).reshape(-1, 2),
         block_edges2=torch.as_tensor(np.concatenate(bedges2), dtype=torch.long).reshape(-1, 2),
+        val_pairs=torch.as_tensor(np.concatenate(vpairs), dtype=torch.long).reshape(-1, 2),
+        val_class=cat(vcls),
         block_of_atom=cat(boa),
         energy=None
         if energies is None
@@ -140,6 +150,12 @@ def radius_graph_brute(batch: Batch, cutoff: float):
     """
     assert batch.cell is None
     pos = batch.positions.detach()
+    if batch.n_atoms <= 6000:  # one masked all-pairs pass over the whole batch
+        d = torch.cdist(pos, pos)
+        m = (d < cutoff) & (batch.struct[:, None] == batch.struct[None, :])
+        m.fill_diagonal_(False)
+        i, j = torch.nonzero(m, as_tuple=True)
+        return i, j, torch.zeros(len(i), 3, dtype=torch.long, device=pos.device)
     ii, jj = [], []
     for s in range(batch.n_struct):
         idx = torch.nonzero(batch.struct == s).squeeze(1)

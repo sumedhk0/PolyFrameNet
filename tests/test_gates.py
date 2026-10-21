@@ -32,7 +32,9 @@ def model():
 def model_noref(model):
     """Same weights, zero per-element offsets. FD differences of a ~-7e4 eV total lose
     ~1e-6 eV/A to float64 rounding (measured: 3e-6 at h=1e-5 with offsets, 5e-10 without);
-    the offsets are constants with zero gradient, so dropping them tests the same forces."""
+    the offsets are constants with zero gradient, so dropping them tests the same forces.
+    h = 1e-5: central-difference truncation error is O(h^2); with the valence term's
+    0.08 A Gaussians it is 8e-8 at h = 1e-4 and 1.6e-9 at h = 1e-5 (measured)."""
     import copy
 
     m = copy.deepcopy(model)
@@ -119,12 +121,12 @@ def test_wrap_invariance(model, melt, rng):
 
 def test_finite_difference_forces_cluster(model_noref, cluster):
     z, p = cluster
-    assert gates.finite_difference_error(model_noref, z, p, h=1e-4) < 1e-8
+    assert gates.finite_difference_error(model_noref, z, p, h=1e-5) < 1e-8
 
 
 def test_finite_difference_forces_periodic(model_noref, melt):
     z, p, cell = melt
-    assert gates.finite_difference_error(model_noref, z, p, cell, h=1e-4) < 1e-8
+    assert gates.finite_difference_error(model_noref, z, p, cell, h=1e-5) < 1e-8
 
 
 def test_energy_smooth_across_cutoff(model):
@@ -169,3 +171,16 @@ def test_automorphism_oracle(model, cluster, rng):
     e = f(z, p)
     es = [f(z[q], p[q]) for q in (rng.permutation(len(z)) for _ in range(8))]
     assert abs(np.mean(es) - e) < 1e-9
+
+
+def test_radius_graph_multi_structure_batch():
+    """The vectorised batch path must never connect atoms of different structures."""
+    rng = np.random.default_rng(7)
+    systems = [pe_cluster(2, 8, rng) for _ in range(3)]
+    b = collate([topology_from_geometry(z, p) for z, p in systems], [p for _, p in systems])
+    a = radius_graph_brute(b, 4.5)
+    v = radius_graph_vesin(b, 4.5)
+    assert set(zip(a[0].tolist(), a[1].tolist(), strict=True)) == set(
+        zip(v[0].tolist(), v[1].tolist(), strict=True)
+    )
+    assert bool((b.struct[a[0]] == b.struct[a[1]]).all())

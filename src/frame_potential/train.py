@@ -84,6 +84,10 @@ def main(argv=None):
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args(argv)
+    if a.out.exists() and any(a.out.iterdir()):
+        # A second launch of the same command once overwrote best.pt with epoch-0 weights
+        # 20 s after the real run finished. Never train into a non-empty directory.
+        raise SystemExit(f"{a.out} is not empty; refusing to overwrite a finished run")
     a.out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(a.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -20,14 +20,14 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase.md.verlet import VelocityVerlet
 
 from frame_potential.batch import collate, radius_graph
-from frame_potential.builders import pe_melt
+from frame_potential.builders import pe_melt_grown
 from frame_potential.calculator import PolyFrameNetCalculator
 from frame_potential.topology import topology_from_geometry
 from frame_potential.train import load_model
 
 
 def melt_atoms(n_chains, n_carbons, density, seed):
-    z, p, cell = pe_melt(n_chains, n_carbons, density, np.random.default_rng(seed))
+    z, p, cell = pe_melt_grown(n_chains, n_carbons, density, np.random.default_rng(seed))
     return Atoms(numbers=z, positions=p, cell=cell, pbc=True)
 
 
@@ -110,7 +110,7 @@ def main():
     mace = MACECalculator(model_paths=str(a.mace), device="cuda", default_dtype="float32")
     res = {"speed": [], "nve": {}}
     for n_chains, n_c in [(4, 40), (16, 40), (64, 40), (128, 40)]:
-        atoms = melt_atoms(n_chains, n_c, 0.40, seed=1)
+        atoms = melt_atoms(n_chains, n_c, 0.50, seed=1)
         ours.topo = None
         row = {"n_atoms": len(atoms), "ours_s": time_calc(ours, atoms),
                "ours_nl_s": time_neighbor_list(atoms, ours.model.cutoff)}
@@ -125,7 +125,7 @@ def main():
             row[f"{k}_ns_day_1fs"] = None if s is None else 86400 / s * 1e-6
         print(row, flush=True)
         res["speed"].append(row)
-    atoms = melt_atoms(8, 40, 0.40, seed=2)
+    atoms = melt_atoms(8, 40, 0.50, seed=2)
     for name, calc in (("ours", ours), ("mace", mace)):
         if name == "ours":
             ours.topo = None
