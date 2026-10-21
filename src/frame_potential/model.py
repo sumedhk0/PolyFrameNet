@@ -15,6 +15,11 @@ Symmetry handling, all by averaging (invariant 5), never by selecting:
   * Chain direction (C1 <-> C2 for every mid block of a chain at once): every stage that
     sees a frame evaluates both frame variants ("fwd", "rev") and averages. End blocks
     (CH3-CH2-) have an intrinsic direction, so their two variants coincide.
+  * Reflection: e3 = e1 x e2 is a pseudovector, so under a mirror the frame turns into
+    Q F diag(1, 1, -1) and frame-projected features change. Each of fwd/rev therefore also
+    comes in a mirrored copy F diag(1, 1, -1), and the average over all four variants
+    makes the energy O(3)- (not just SO(3)-) invariant: gauche+ and gauche- conformers,
+    which are mirror images, get the same energy.
 """
 
 from __future__ import annotations
@@ -83,7 +88,13 @@ def _end_group():
     return out
 
 
-GROUPS = {MID: _mid_group(), END: _end_group()}
+def _with_mirror(group):
+    """Variant v (0 fwd, 1 rev) -> also v + 2, the same frame with e3 negated."""
+    return group + [(v + 2, perm) for v, perm in group]
+
+
+N_VARIANTS = 4  # fwd, rev, fwd mirrored, rev mirrored
+GROUPS = {MID: _with_mirror(_mid_group()), END: _with_mirror(_end_group())}
 
 
 # ----------------------------------------------------------------------------- Stage 1
@@ -103,7 +114,8 @@ def _frame(e1_from, e1_to, carbon, hydrogens):
 
 
 def block_frames(X: torch.Tensor, btype: int):
-    """X: (B, n, 3) contiguous block positions. Returns origin (B,3), F (2, B, 3, 3)."""
+    """X: (B, n, 3) contiguous block positions. Returns origin (B,3), F (4, B, 3, 3):
+    fwd, rev, and their mirrored copies (columns e1, e2, -e3)."""
     o = X.mean(1)
     if btype == MID:
         f = _frame(X[:, 0], X[:, 1], X[:, 0], [X[:, 2], X[:, 3]])
@@ -112,7 +124,8 @@ def block_frames(X: torch.Tensor, btype: int):
         # Cm -> Cc; the CH2 hydrogens define e2 (a CH3's three H sum to ~0, degenerate).
         f = _frame(X[:, 0], X[:, 1], X[:, 1], [X[:, 5], X[:, 6]])
         r = f
-    return o, torch.stack([f, r], 0)
+    mirror = torch.tensor([1.0, 1.0, -1.0], dtype=X.dtype, device=X.device)
+    return o, torch.stack([f, r, f * mirror, r * mirror], 0)
 
 
 # ----------------------------------------------------------------------------- Stage 2
@@ -147,7 +160,7 @@ class BlockEncoder(nn.Module):
         # Xt (B,n,3); species (B,n) in {0:H, 1:C}; F (2,B,3,3); o (B,3)
         B = Xt.shape[0]
         rel = Xt - o[:, None, :]
-        coords = [torch.einsum("bni,bij->bnj", rel, F[v]) for v in range(2)]  # F^T (r - o)
+        coords = [torch.einsum("bni,bij->bnj", rel, F[v]) for v in range(N_VARIANTS)]
         emb = self.species(species)
         # All intra-block distances, Gaussian-expanded: the stiff bond / angle terms are
         # simple functions of these, hard functions of raw Cartesian frame coordinates.
@@ -187,14 +200,14 @@ class BondedLayer(nn.Module):
         self.upd = mlp([2 * d, hidden, d])
 
     def forward(self, H, src, dst, R, dvec, efeat):
-        # R: (2, E, 9), dvec: (2, E, 3) per frame variant; message flows src -> dst
+        # R: (V, E, 9), dvec: (V, E, 3) per frame variant; message flows src -> dst
         m = 0.0
-        for v in range(2):
+        for v in range(N_VARIANTS):
             z = torch.cat(
                 [H[dst], H[src], R[v], dvec[v], dvec[v].norm(dim=-1, keepdim=True), efeat], -1
             )
             m = m + self.msg(z)
-        m = 0.5 * m
+        m = m / N_VARIANTS
         agg = torch.zeros_like(H).index_add_(0, dst, m)
         return H + self.upd(torch.cat([H, agg], -1))
 
@@ -349,8 +362,15 @@ class PolyFrameNet(nn.Module):
         self.long_range = long_range
         self.valence = Valence()
         # Per-element reference energies and scale; set from training data (fit_reference).
-        self.register_buffer("e0", torch.zeros(2))  # [H, C] eV
+        # Per-element reference energies [H, C], stored as integer micro-eV so that
+        # model.to(float32) cannot round them (E0[C] ~ -1037 eV: float32 would quantise a
+        # 1000-atom total at ~0.06 eV, which swamps an NVE drift measurement).
+        self.register_buffer("e0_micro", torch.zeros(2, dtype=torch.long))
         self.register_buffer("scale", torch.ones(()))
+
+    def set_reference(self, e0):
+        """e0 = [E0_H, E0_C] in eV."""
+        self.e0_micro.copy_(torch.round(torch.as_tensor(e0, dtype=torch.float64) * 1e6).long())
 
     # -- Stage 5 hook -------------------------------------------------------------------
     def long_range_energy(self, batch: Batch, x_atom: torch.Tensor) -> torch.Tensor:
@@ -362,13 +382,12 @@ class PolyFrameNet(nn.Module):
         N = batch.n_atoms
         B = batch.block_type.shape[0]
         species = (batch.numbers == 6).long()
-        dt = pos.dtype
 
         # Stages 1+2, per block type ---------------------------------------------------
         h_atom = pos.new_zeros(N, self.encoders[str(MID)].d_atom)
         H = pos.new_zeros(B, self.block_type_emb.embedding_dim)
         origins = pos.new_zeros(B, 3)
-        Fb = pos.new_zeros(2, B, 3, 3)
+        Fb = pos.new_zeros(N_VARIANTS, B, 3, 3)
         XB = pos.new_zeros(B, 7, 3)  # contiguous block positions, padded to 7 slots
         SB = torch.full((B, 7), -1, dtype=torch.long, device=pos.device)  # species, -1 = pad
         for t in (MID, END):
@@ -401,7 +420,7 @@ class PolyFrameNet(nn.Module):
             dO = origins[src] - origins[dst]
             if batch.cell is not None:
                 dO = _mic_shift(dO, batch.cell[batch.block_struct[dst]])
-            R = torch.einsum("veij,veik->vejk", Fb[:, dst], Fb[:, src]).reshape(2, -1, 9)
+            R = torch.einsum("veij,veik->vejk", Fb[:, dst], Fb[:, src]).reshape(N_VARIANTS, -1, 9)
             dvec = torch.einsum("veij,ei->vej", Fb[:, dst], dO)
             # All atom pairs across the two blocks, Gaussian-expanded and summed within
             # each species-pair class (CC, CH, HH): the sum makes it invariant to hydrogen
@@ -435,14 +454,18 @@ class PolyFrameNet(nn.Module):
         # Stage 6: readout, averaged over the two frame variants -----------------------
         sp = self.species_emb(species)
         eps = 0.0
-        for v in range(2):
+        for v in range(N_VARIANTS):
             Fa = Fb[v][batch.block_of_atom]
             nb = self.nonbonded.project(M0, M1, M2, Fa)
             eps = eps + self.readout(torch.cat([x_atom, nb, sp], -1)).squeeze(-1)
-        eps = (0.5 * eps + self.valence(batch, pos)) * self.scale + self.e0[species]
-        E = pos.new_zeros(batch.n_struct, dtype=dt).index_add_(0, batch.struct, eps)
+        eps = (eps / N_VARIANTS + self.valence(batch, pos)) * self.scale
+        # Sum and offsets in float64 regardless of the model dtype (see e0_micro).
+        e0 = self.e0_micro.double() * 1e-6
+        eps64 = eps.double() + e0[species]
+        E = torch.zeros(batch.n_struct, dtype=torch.float64, device=pos.device)
+        E = E.index_add(0, batch.struct, eps64)
         if self.long_range:
-            E = E + self.long_range_energy(batch, x_atom)
+            E = E + self.long_range_energy(batch, x_atom).double()
         return E
 
 

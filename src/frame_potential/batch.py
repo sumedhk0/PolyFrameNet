@@ -68,12 +68,13 @@ class Batch:
             val_pairs=mv(self.val_pairs),
             val_class=mv(self.val_class),
             block_of_atom=mv(self.block_of_atom),
-            energy=mv(self.energy),
+            # Targets stay float64: a -6e4 eV total in float32 is quantised at ~4 meV.
+            energy=None if self.energy is None else self.energy.to(device),
             forces=mv(self.forces),
         )
 
 
-def collate(
+def collate(  # always float64; Batch.to(device, dtype) casts for float32 training
     topos: list[Topology],
     positions: list[np.ndarray],
     cells: list[np.ndarray] | None = None,
@@ -114,12 +115,12 @@ def collate(
 
     return Batch(
         numbers=cat(numbers),
-        positions=cat(pos, torch.get_default_dtype()),
+        positions=cat(pos, torch.float64),
         struct=cat(struct),
         n_struct=len(topos),
         cell=None
         if cells is None
-        else torch.as_tensor(np.stack(cells), dtype=torch.get_default_dtype()),
+        else torch.as_tensor(np.stack(cells), dtype=torch.float64),
         block_type=cat(btype),
         block_struct=cat(bstruct),
         block_chain=cat(bchain),
@@ -134,8 +135,8 @@ def collate(
         block_of_atom=cat(boa),
         energy=None
         if energies is None
-        else torch.as_tensor(np.asarray(energies), dtype=torch.get_default_dtype()),
-        forces=None if forces is None else cat(forces, torch.get_default_dtype()),
+        else torch.as_tensor(np.asarray(energies), dtype=torch.float64),
+        forces=None if forces is None else cat(forces, torch.float64),
     )
 
 

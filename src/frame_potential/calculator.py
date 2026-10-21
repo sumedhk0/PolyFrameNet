@@ -27,10 +27,10 @@ class PolyFrameNetCalculator(Calculator):
         super().calculate(atoms, properties, system_changes)
         pos = atoms.get_positions()
         cell = np.asarray(atoms.cell) if atoms.pbc.any() else None
-        if self.topo is None or len(self.topo.numbers) != len(atoms):
+        if self.topo is None or not np.array_equal(self.topo.numbers, atoms.numbers):
             self.topo = topology_from_geometry(atoms.numbers, pos, cell)
         b = collate([self.topo], [pos], None if cell is None else [cell])
         b = b.to(self.device, self.dtype)
         E, F = energy_and_forces(self.model, b)
-        self.results["energy"] = float(E.detach().double().sum())
+        self.results["energy"] = float(E.detach().sum())  # float64 (see model.e0_micro)
         self.results["forces"] = F.detach().double().cpu().numpy()

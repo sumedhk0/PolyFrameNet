@@ -50,19 +50,22 @@ def _load_shard(f: pathlib.Path) -> list[Frame]:
     d = np.load(f)
     source = "val" if "val" in f.name else "train"
     off = d["offsets"]
+    # NpzFile re-decompresses on every key access: read each array once.
+    z_all, r_all, f_all = d["numbers"], d["positions"], d["forces"]
+    e_all, names = d["energy"], d["names"]
     out = []
     for k in range(len(off) - 1):
-        z = d["numbers"][off[k] : off[k + 1]]
+        z = z_all[off[k] : off[k + 1]]
         if _quick_reject(z):
             continue
-        r = d["positions"][off[k] : off[k + 1]]
+        r = r_all[off[k] : off[k + 1]]
         try:
             topo = topology_from_geometry(z, r)
         except TopologyError:
             continue
         out.append(
-            Frame(z, r, d["forces"][off[k] : off[k + 1]], float(d["energy"][k]), topo,
-                  system_key(str(d["names"][k])), source)
+            Frame(z, r, f_all[off[k] : off[k + 1]], float(e_all[k]), topo,
+                  system_key(str(names[k])), source)
         )
     return out
 

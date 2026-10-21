@@ -87,8 +87,10 @@ def infer_bonds(numbers: np.ndarray, positions: np.ndarray, cell: np.ndarray | N
     if cell is None:
         tree = cKDTree(positions)
     else:
-        L = np.diag(cell)
-        tree = cKDTree(np.mod(positions, L), boxsize=L)
+        L = np.abs(np.diag(cell))  # a mirrored cell diag(-L, L, L) is the same lattice
+        x = positions - L * np.floor(positions / L)
+        x[x >= L] = 0.0  # np.mod(-1e-20, L) == L, which cKDTree rejects
+        tree = cKDTree(x, boxsize=L)
     pairs = tree.query_pairs(CC_MAX, output_type="ndarray")
     if not len(pairs):
         return np.zeros((0, 2), np.int64)

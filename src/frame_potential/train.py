@@ -100,7 +100,7 @@ def main(argv=None):
                          exclude_hops=a.exclude_hops)
     e0, _ = fit_reference(train)
     f_rms = float(np.sqrt(np.mean(np.concatenate([f.forces.ravel() for f in train]) ** 2)))
-    model.e0.copy_(torch.tensor(e0))
+    model.set_reference(e0)
     model.scale.fill_(f_rms)  # readout in units of the typical force scale
     avg = measure_avg_neighbors(train, a.cutoff, model.exclude_hops)
     model.nonbonded.avg_nbr = avg
@@ -128,8 +128,8 @@ def main(argv=None):
         for ids in batches:
             b = collate_frames(train, ids).to(device, torch.float32)
             E, F = energy_and_forces(model, b, create_graph=True)
-            n = torch.bincount(b.struct, minlength=b.n_struct).float()
-            le = (((E - b.energy) / n) ** 2).mean()
+            n = torch.bincount(b.struct, minlength=b.n_struct).double()
+            le = (((E - b.energy) / n) ** 2).mean().float()  # difference taken in float64
             lf = ((F - b.forces) ** 2).mean()
             loss = a.w_energy * le + a.w_forces * lf
             opt.zero_grad(set_to_none=True)

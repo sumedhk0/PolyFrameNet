@@ -24,7 +24,7 @@ def model():
     torch.manual_seed(1)
     m = PolyFrameNet(cutoff=4.5).double()
     # Random non-trivial reference/scale so they are exercised too.
-    m.e0.copy_(torch.tensor([-13.6, -1029.0], dtype=torch.float64))
+    m.set_reference([-13.6, -1029.0])
     return m.eval()
 
 
@@ -38,7 +38,7 @@ def model_noref(model):
     import copy
 
     m = copy.deepcopy(model)
-    m.e0.zero_()
+    m.set_reference([0.0, 0.0])
     return m
 
 
@@ -207,3 +207,69 @@ def test_all_pairs_rotation_permutation_wrap(model_all_pairs, cluster, melt, rng
 def test_all_pairs_finite_difference(model_all_pairs, melt):
     z, p, cell = melt
     assert gates.finite_difference_error(model_all_pairs, z, p, cell, h=1e-5) < 1e-8
+
+
+def test_reflection_invariance(model, model_all_pairs, cluster, melt):
+    """Mirror images (e.g. gauche+ vs gauche-) must have equal energy. Caught in review:
+    without the mirrored frame variants the untrained model gave dE ~ 1e-3 eV."""
+    M = np.diag([-1.0, 1.0, 1.0])
+    for m in (model, model_all_pairs):
+        f = gates.make_energy_fn(m)
+        z, p = cluster
+        assert abs(f(z, p @ M) - f(z, p)) < 1e-9
+        z, p, cell = melt
+        assert abs(f(z, p @ M, cell @ M) - f(z, p, cell)) < 1e-9
+
+
+def test_float32_matches_float64(model_all_pairs, melt):
+    """Energy is summed in float64 with exact offsets, so float32 inference differs from
+    float64 only by network rounding (~1e-6 relative per atom), not by offset rounding."""
+    import copy
+
+    z, p, cell = melt
+    t = topology_from_geometry(z, p, cell)
+    m64 = copy.deepcopy(model_all_pairs)
+    m64.set_reference([-16.3, -1036.8])
+    m32 = copy.deepcopy(m64).float()
+    b = collate([t], [p], [cell])
+    e64 = float(m64(b.to("cpu", torch.float64))[0])
+    e32 = float(m32(b.to("cpu", torch.float32))[0])
+    assert m32(b.to("cpu", torch.float32)).dtype == torch.float64
+    assert abs(e32 - e64) < 1e-3 * len(z) ** 0.5 * 1e-1
+
+
+def test_butane_two_block_chain(model):
+    z, p = pe_chain(4)
+    t = topology_from_geometry(z, p)
+    assert t.block_atoms[END].shape == (2, 7) and t.block_atoms[MID].shape == (0, 6)
+    assert len(t.block_edges) == 1 and len(t.block_edges2) == 0
+    f = gates.make_energy_fn(model)
+    assert np.isfinite(f(z, p))
+
+
+def test_batch_equals_single(model, melt, cluster):
+    z, p, cell = melt
+    t = topology_from_geometry(z, p, cell)
+    single = float(model(collate([t], [p], [cell]))[0])
+    both = model(collate([t, t], [p, p + 0.3], [cell, cell]))
+    assert abs(float(both[0]) - single) < 1e-9 and abs(float(both[1]) - single) < 1e-9
+    z, p = cluster
+    t = topology_from_geometry(z, p)
+    single = float(model(collate([t], [p]))[0])
+    both = model(collate([t, t], [p, p + 50.0]))
+    assert abs(float(both[0]) - single) < 1e-9 and abs(float(both[1]) - single) < 1e-9
+
+
+def test_calculator_matches_model(model, melt):
+    from ase import Atoms
+
+    from frame_potential.calculator import PolyFrameNetCalculator
+    from frame_potential.model import energy_and_forces
+
+    z, p, cell = melt
+    at = Atoms(numbers=z, positions=p, cell=cell, pbc=True)
+    at.calc = PolyFrameNetCalculator(model, device="cpu", dtype=torch.float64)
+    t = topology_from_geometry(z, p, cell)
+    E, F = energy_and_forces(model, collate([t], [p], [cell]))
+    assert abs(at.get_potential_energy() - float(E[0])) < 1e-9
+    assert np.abs(at.get_forces() - F.detach().numpy()).max() < 1e-9
