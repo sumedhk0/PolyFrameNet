@@ -31,6 +31,7 @@ class Batch:
     block_atoms: dict[int, torch.Tensor]  # type -> (B_t, n_t) atom indices
     block_ids: dict[int, torch.Tensor]  # type -> (B_t,) global block ids
     block_edges: torch.Tensor  # (E_bb, 2)
+    block_edges2: torch.Tensor  # (E_bb2, 2) second-neighbour block pairs
     block_of_atom: torch.Tensor  # (N,)
     # Targets (optional)
     energy: torch.Tensor | None = None  # (S,)
@@ -61,6 +62,7 @@ class Batch:
             block_atoms={k: mv(v) for k, v in self.block_atoms.items()},
             block_ids={k: mv(v) for k, v in self.block_ids.items()},
             block_edges=mv(self.block_edges),
+            block_edges2=mv(self.block_edges2),
             block_of_atom=mv(self.block_of_atom),
             energy=mv(self.energy),
             forces=mv(self.forces),
@@ -78,7 +80,7 @@ def collate(
     b_off = 0
     c_off = 0
     numbers, pos, struct = [], [], []
-    btype, bstruct, bchain, bpos, bedges, boa = [], [], [], [], [], []
+    btype, bstruct, bchain, bpos, bedges, bedges2, boa = [], [], [], [], [], [], []
     batoms = {MID: [], END: []}
     bids = {MID: [], END: []}
     for s, (t, r) in enumerate(zip(topos, positions, strict=True)):
@@ -90,6 +92,7 @@ def collate(
         bchain.append(t.block_chain + c_off)
         bpos.append(t.block_pos)
         bedges.append(t.block_edges + b_off)
+        bedges2.append(t.block_edges2 + b_off)
         boa.append(t.block_of_atom + b_off)
         for k in (MID, END):
             batoms[k].append(t.block_atoms[k] + a_off)
@@ -117,6 +120,7 @@ def collate(
             -1, 6 if k == MID else 7) for k, v in batoms.items()},
         block_ids={k: cat(v) for k, v in bids.items()},
         block_edges=torch.as_tensor(np.concatenate(bedges), dtype=torch.long).reshape(-1, 2),
+        block_edges2=torch.as_tensor(np.concatenate(bedges2), dtype=torch.long).reshape(-1, 2),
         block_of_atom=cat(boa),
         energy=None
         if energies is None

@@ -54,6 +54,8 @@ class Topology:
     block_ids: dict[int, np.ndarray] = field(default_factory=dict)
     # Block graph: consecutive blocks along each chain, (E_bb, 2) with I < J along chain.
     block_edges: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.int64))
+    # Second-neighbour block pairs (I, I+2) on the same chain.
+    block_edges2: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.int64))
 
     @property
     def n_atoms(self) -> int:
@@ -144,6 +146,7 @@ def build_topology(numbers, bonds) -> Topology:
     slot_of_atom = -np.ones(n, dtype=np.int64)
     btype, bchain, bpos, batoms = [], [], [], []
     edges = []
+    edges2 = []
     for ci, ch in enumerate(chains):
         nc = len(ch)
         if nc < 4 or nc % 2:
@@ -173,6 +176,8 @@ def build_topology(numbers, bonds) -> Topology:
             batoms.append(atoms)
             if k > 0:
                 edges.append((bid - 1, bid))
+            if k > 1:
+                edges2.append((bid - 2, bid))
         del first
     if np.any(block_of_atom < 0):
         raise TopologyError("atom not assigned to a block (stray H?)")
@@ -188,6 +193,7 @@ def build_topology(numbers, bonds) -> Topology:
         block_chain=np.asarray(bchain, dtype=np.int64),
         block_pos=np.asarray(bpos, dtype=np.int64),
         block_edges=np.asarray(edges, dtype=np.int64).reshape(-1, 2),
+        block_edges2=np.asarray(edges2, dtype=np.int64).reshape(-1, 2),
     )
     for t in (MID, END):
         ids = np.nonzero(btype == t)[0]

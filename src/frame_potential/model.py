@@ -45,6 +45,14 @@ def _normalize(v, eps=1e-12):
     return v / torch.sqrt((v * v).sum(-1, keepdim=True) + eps)
 
 
+def gaussians(r: torch.Tensor, lo: float, hi: float, k: int):
+    """Gaussian radial expansion, width = spacing. Used only on topological pairs (fixed set,
+    never enters or leaves), so no cutoff envelope is needed."""
+    mu = torch.linspace(lo, hi, k, device=r.device, dtype=r.dtype)
+    w = (hi - lo) / (k - 1)
+    return torch.exp(-0.5 * ((r[..., None] - mu) / w) ** 2)
+
+
 def _mic_shift(d: torch.Tensor, cell: torch.Tensor | None):
     """Minimum-image correction for short intra-block / intra-chain vectors.
 
@@ -120,8 +128,14 @@ class BlockEncoder(nn.Module):
         self.d_atom = d_atom
         self.d_block = d_block
         self.species = nn.Embedding(n_species, 8)
-        self.net = mlp([self.n * (3 + 8), hidden, hidden, hidden, self.n * d_atom + d_block])
+        self.n_rbf = 8
+        n_pairs = self.n * (self.n - 1) // 2
+        self.net = mlp(
+            [self.n * (3 + 8) + n_pairs * self.n_rbf, hidden, hidden, hidden,
+             self.n * d_atom + d_block]
+        )
         self.group = GROUPS[btype]
+        self.register_buffer("triu", torch.triu_indices(self.n, self.n, 1), persistent=False)
 
     def forward(self, Xt: torch.Tensor, species: torch.Tensor, F: torch.Tensor, o: torch.Tensor):
         # Xt (B,n,3); species (B,n) in {0:H, 1:C}; F (2,B,3,3); o (B,3)
@@ -129,10 +143,16 @@ class BlockEncoder(nn.Module):
         rel = Xt - o[:, None, :]
         coords = [torch.einsum("bni,bij->bnj", rel, F[v]) for v in range(2)]  # F^T (r - o)
         emb = self.species(species)
+        # All intra-block distances, Gaussian-expanded: the stiff bond / angle terms are
+        # simple functions of these, hard functions of raw Cartesian frame coordinates.
+        # (cdist has no double backward, which force training needs.)
+        dv = Xt[:, :, None, :] - Xt[:, None, :, :]
+        D = gaussians(torch.sqrt((dv * dv).sum(-1) + 1e-12), 0.8, 3.2, self.n_rbf)
         h_acc = Xt.new_zeros(B, self.n, self.d_atom)
         H_acc = Xt.new_zeros(B, self.d_block)
         for v, perm in self.group:
-            x = torch.cat([coords[v][:, perm], emb[:, perm]], -1).reshape(B, -1)
+            Dp = D[:, perm][:, :, perm][:, self.triu[0], self.triu[1]].reshape(B, -1)
+            x = torch.cat([coords[v][:, perm].reshape(B, -1), emb[:, perm].reshape(B, -1), Dp], -1)
             y = self.net(x)
             ha = y[:, : self.n * self.d_atom].reshape(B, self.n, self.d_atom)
             h_acc[:, perm] += ha  # un-permute: output slot s belongs to atom perm[s]
@@ -147,19 +167,22 @@ class BlockEncoder(nn.Module):
 class BondedLayer(nn.Module):
     """One round of message passing on the block chain graph.
 
-    Edge input: [H_I, H_J, R_IJ (9 raw entries), d_IJ (3), |d_IJ|]. Averaged over the
-    two chain-direction frame variants. Sum aggregation (size-consistent), residual."""
+    Edge input: [H_I, H_J, R_IJ (9 raw entries), d_IJ (3), |d_IJ|, pair-pooled distance
+    expansion (invariant, see PolyFrameNet.forward), edge type (first/second neighbour)].
+    Averaged over the two chain-direction frame variants. Sum aggregation, residual."""
 
-    def __init__(self, d: int, hidden: int):
+    def __init__(self, d: int, hidden: int, d_edge: int):
         super().__init__()
-        self.msg = mlp([2 * d + 13, hidden, hidden, d])
+        self.msg = mlp([2 * d + 13 + d_edge, hidden, hidden, d])
         self.upd = mlp([2 * d, hidden, d])
 
-    def forward(self, H, src, dst, R, dvec):
+    def forward(self, H, src, dst, R, dvec, efeat):
         # R: (2, E, 9), dvec: (2, E, 3) per frame variant; message flows src -> dst
         m = 0.0
         for v in range(2):
-            z = torch.cat([H[dst], H[src], R[v], dvec[v], dvec[v].norm(dim=-1, keepdim=True)], -1)
+            z = torch.cat(
+                [H[dst], H[src], R[v], dvec[v], dvec[v].norm(dim=-1, keepdim=True), efeat], -1
+            )
             m = m + self.msg(z)
         m = 0.5 * m
         agg = torch.zeros_like(H).index_add_(0, dst, m)
@@ -272,7 +295,11 @@ class PolyFrameNet(nn.Module):
             {str(t): BlockEncoder(t, d_atom, d_block, hidden) for t in (MID, END)}
         )
         self.block_type_emb = nn.Embedding(2, d_block)
-        self.bonded = nn.ModuleList([BondedLayer(d_block, hidden) for _ in range(n_bonded)])
+        self.n_pair_rbf = 24
+        d_edge = 3 * self.n_pair_rbf + 2
+        self.bonded = nn.ModuleList(
+            [BondedLayer(d_block, hidden, d_edge) for _ in range(n_bonded)]
+        )
         d_ctx = d_atom + d_block
         self.nonbonded = NonBonded(d_ctx, n_rbf, n_ch, d_nb, cutoff, avg_nbr)
         self.species_emb = nn.Embedding(2, 16)
@@ -299,6 +326,8 @@ class PolyFrameNet(nn.Module):
         H = pos.new_zeros(B, self.block_type_emb.embedding_dim)
         origins = pos.new_zeros(B, 3)
         Fb = pos.new_zeros(2, B, 3, 3)
+        XB = pos.new_zeros(B, 7, 3)  # contiguous block positions, padded to 7 slots
+        SB = torch.full((B, 7), -1, dtype=torch.long, device=pos.device)  # species, -1 = pad
         for t in (MID, END):
             idx = batch.block_atoms[t]
             if idx.shape[0] == 0:
@@ -314,19 +343,40 @@ class PolyFrameNet(nn.Module):
             H[ids] = Hb + self.block_type_emb.weight[t]
             origins[ids] = o
             Fb[:, ids] = F
+            XB[ids, : idx.shape[1]] = X
+            SB[ids, : idx.shape[1]] = species[idx]
 
         # Stage 3: bonded channel on the block chain -----------------------------------
         if batch.block_edges.shape[0]:
-            a, b = batch.block_edges[:, 0], batch.block_edges[:, 1]
+            e1, e2 = batch.block_edges, batch.block_edges2
+            a = torch.cat([e1[:, 0], e2[:, 0]])
+            b = torch.cat([e1[:, 1], e2[:, 1]])
+            etype = torch.cat([a.new_zeros(len(e1)), a.new_ones(len(e2))])
             src = torch.cat([a, b])
             dst = torch.cat([b, a])
+            etype = torch.cat([etype, etype])
             dO = origins[src] - origins[dst]
             if batch.cell is not None:
                 dO = _mic_shift(dO, batch.cell[batch.block_struct[dst]])
             R = torch.einsum("veij,veik->vejk", Fb[:, dst], Fb[:, src]).reshape(2, -1, 9)
             dvec = torch.einsum("veij,ei->vej", Fb[:, dst], dO)
+            # All atom pairs across the two blocks, Gaussian-expanded and summed within
+            # each species-pair class (CC, CH, HH): the sum makes it invariant to hydrogen
+            # labels and chain direction, and it carries the junction bond, angles and the
+            # 1-4 / 1-5 contacts explicitly.
+            rel_s = XB[src] - origins[src][:, None]
+            rel_d = XB[dst] - origins[dst][:, None]
+            pv = rel_s[:, None, :, :] - rel_d[:, :, None, :] + dO[:, None, None, :]
+            r = torch.sqrt((pv * pv).sum(-1) + 1e-12)  # (E, 7, 7)
+            ss, sd = SB[src][:, None, :], SB[dst][:, :, None]
+            valid = (ss >= 0) & (sd >= 0)
+            cls = torch.where(valid, ss + sd, torch.zeros_like(ss + sd))
+            onehot = nn.functional.one_hot(cls, 3).to(pos.dtype) * valid[..., None]
+            G = gaussians(r, 1.0, 7.0, self.n_pair_rbf)  # (E, 7, 7, K)
+            pooled = torch.einsum("eabc,eabk->eck", onehot, G).reshape(len(src), -1) / 4.0
+            efeat = torch.cat([pooled, nn.functional.one_hot(etype, 2).to(pos.dtype)], -1)
             for layer in self.bonded:
-                H = layer(H, src, dst, R, dvec)
+                H = layer(H, src, dst, R, dvec, efeat)
 
         # Stage 4: non-bonded channel --------------------------------------------------
         x_atom = torch.cat([h_atom, H[batch.block_of_atom]], -1)
