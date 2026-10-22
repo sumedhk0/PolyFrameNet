@@ -1,6 +1,7 @@
 """Accuracy of any ASE calculator on an extxyz split with REF_energy / REF_forces.
 Usage: python scripts/eval_ase.py <kind> <model> <split.xyz> <out.json>
-kind: v1 | v2 | mace | allegro | deepmd | uma. Runs inside that model's own environment."""
+kind: v1 | v2 | mace | allegro | allegro_aoti | deepmd | uma.
+Runs inside that model's own environment."""
 
 import json
 import sys
@@ -32,6 +33,10 @@ def make_calc(kind, model, dtype="float64"):
         # and AOTInductor needs MSVC (not installed). Slower than compiled Allegro.
         from nequip.integrations.ase import NequIPCalculator
         return NequIPCalculator._from_saved_model(model, device="cuda")
+    if kind == "allegro_aoti":
+        # Allegro as deployed: compiled with `nequip-compile --mode aotinductor --target ase`
+        from nequip.integrations.ase import NequIPCalculator
+        return NequIPCalculator.from_compiled_model(model, device="cuda")
     if kind == "deepmd":
         from deepmd.calculator import DP
         return DP(model=model)
