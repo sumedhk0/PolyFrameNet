@@ -31,6 +31,7 @@ from .data import (
     split_v2,
 )
 from .model import PolyFrameNetV2
+from .registry import BlockRegistry
 
 
 def evaluate_v2(model, frames, device, max_atoms=4000, dtype=torch.float64):
@@ -164,6 +165,7 @@ def main(argv=None):
             break
     torch.save({"state": ema.state_dict(), "config": ema.config}, a.out / "last.pt")
     bm = load_model_v2(a.out / "best.pt", device)
+    BlockRegistry.build(bm, train, device).save(a.out / "registry.json")
     res = {"val": evaluate_v2(bm, val, device), "test": evaluate_v2(bm, test, device),
            "pe_test": evaluate_v2(bm, pe_test, device), "n_params": n_params,
            "args": {k: str(v) for k, v in vars(a).items()}}
