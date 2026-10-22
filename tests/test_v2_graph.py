@@ -2,7 +2,6 @@ import pathlib
 
 import numpy as np
 import pytest
-from v2_molecules import HETERO, HYDROCARBONS, ether_chain, g2, ion_pair
 
 from frame_potential.builders import pe_chain, pe_cluster, pe_melt
 from frame_potential.topology import TopologyError, infer_bonds
@@ -11,6 +10,7 @@ from frame_potential.v2.graph import (
     infer_bonds_general,
     topology_from_geometry_v2,
 )
+from v2_molecules import HETERO, HYDROCARBONS, ether_chain, g2, ion_pair
 
 
 def blocks_of(t):

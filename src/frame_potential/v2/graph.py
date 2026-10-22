@@ -202,13 +202,13 @@ def build_graph_topology(numbers, bonds) -> GraphTopology:
 
     bb = set()
     for a, b in bonds.tolist():
-        I, J = int(block_of_atom[a]), int(block_of_atom[b])
-        if I != J:
-            bb.add((min(I, J), max(I, J)))
+        ba_, bb_ = int(block_of_atom[a]), int(block_of_atom[b])
+        if ba_ != bb_:
+            bb.add((min(ba_, bb_), max(ba_, bb_)))
     adj: list[set[int]] = [set() for _ in range(B)]
-    for I, J in bb:
-        adj[I].add(J)
-        adj[J].add(I)
+    for x, y in bb:
+        adj[x].add(y)
+        adj[y].add(x)
     bb2 = set()
     for K in range(B):
         nb = sorted(adj[K])
@@ -217,8 +217,9 @@ def build_graph_topology(numbers, bonds) -> GraphTopology:
                 if (nb[x], nb[y]) not in bb:
                     bb2.add((nb[x], nb[y]))
     e1, e2 = sorted(bb), sorted(bb2)
-    src = [J for _, J in e1] + [I for I, _ in e1] + [J for _, J in e2] + [I for I, _ in e2]
-    dst = [I for I, _ in e1] + [J for _, J in e1] + [I for I, _ in e2] + [J for _, J in e2]
+    # each undirected pair (x, y), x < y, gives messages y -> x and x -> y
+    src = [y for _, y in e1] + [x for x, _ in e1] + [y for _, y in e2] + [x for x, _ in e2]
+    dst = [x for x, _ in e1] + [y for _, y in e1] + [x for x, _ in e2] + [y for _, y in e2]
     hop = [0] * (2 * len(e1)) + [1] * (2 * len(e2))
 
     vp, vd = [], []
@@ -249,9 +250,9 @@ def attach_rows(topo: GraphTopology) -> GraphTopology:
     for r, k in enumerate(topo.var_block.tolist()):
         rows_of[k].append(r)
     ev_e, ev_v = [], []
-    for e, I in enumerate(topo.edge_dst.tolist()):
-        ev_e += [e] * len(rows_of[I])
-        ev_v += rows_of[I]
+    for e, recv in enumerate(topo.edge_dst.tolist()):
+        ev_e += [e] * len(rows_of[recv])
+        ev_v += rows_of[recv]
     av_a, av_v = [], []
     for i, k in enumerate(topo.block_of_atom.tolist()):
         av_a += [i] * len(rows_of[k])
