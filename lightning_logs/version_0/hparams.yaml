@@ -1,0 +1,199 @@
+model:
+  _target_: allegro.model.AllegroModel
+  seed: 0
+  model_dtype: float32
+  type_names:
+  - H
+  - C
+  r_max: 5.0
+  radial_chemical_embed:
+    _target_: allegro.nn.TwoBodyBesselScalarEmbed
+    num_bessels: 8
+    bessel_trainable: false
+    polynomial_cutoff_p: 6
+  radial_chemical_embed_dim: 64
+  scalar_embed_mlp_hidden_layers_depth: 1
+  scalar_embed_mlp_hidden_layers_width: 64
+  scalar_embed_mlp_nonlinearity: silu
+  l_max: 2
+  num_layers: 2
+  num_scalar_features: 64
+  num_tensor_features: 32
+  allegro_mlp_hidden_layers_depth: 2
+  allegro_mlp_hidden_layers_width: 128
+  allegro_mlp_nonlinearity: silu
+  parity: true
+  tp_path_channel_coupling: true
+  readout_mlp_hidden_layers_depth: 1
+  readout_mlp_hidden_layers_width: 32
+  readout_mlp_nonlinearity: null
+  avg_num_neighbors: 29.665312598351115
+  per_type_energy_shifts:
+    H: -16.187927411459444
+    C: -1036.9827739687719
+  per_type_energy_scales: 0.7801176124568223
+  per_type_energy_scales_trainable: false
+  per_type_energy_shifts_trainable: false
+num_datasets:
+  train: 1
+  val: 1
+  test: 1
+  predict: 0
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 0.001
+lr_scheduler:
+  scheduler:
+    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+    factor: 0.6
+    patience: 3
+  monitor: val0_epoch/weighted_sum
+  interval: epoch
+  frequency: 1
+loss:
+  _target_: nequip.train.EnergyForceLoss
+  per_atom_energy: true
+  coeffs:
+    total_energy: 20.0
+    forces: 1.0
+train_metrics: null
+val_metrics:
+  _target_: nequip.train.EnergyForceMetrics
+  coeffs:
+    per_atom_energy_mae: 1.0
+    forces_mae: 1.0
+test_metrics:
+  _target_: nequip.train.EnergyForceMetrics
+  coeffs:
+    per_atom_energy_mae: 1.0
+    forces_mae: 1.0
+info_dict:
+  versions:
+    torch: 2.11.0+cu128
+    e3nn: 0.6.0
+    nequip: 0.19.1
+    allegro: 0.8.3
+  data:
+    _target_: nequip.data.datamodule.ASEDataModule
+    seed: 0
+    train_file_path: C:/Users/sumedh/polyframenet_data/extxyz_v2/train.xyz
+    val_file_path: C:/Users/sumedh/polyframenet_data/extxyz_v2/val.xyz
+    test_file_path: C:/Users/sumedh/polyframenet_data/extxyz_v2/pe_test.xyz
+    key_mapping:
+      REF_energy: total_energy
+      REF_forces: forces
+    transforms:
+    - _target_: nequip.data.transforms.ChemicalSpeciesToAtomTypeMapper
+      model_type_names:
+      - H
+      - C
+      chemical_species_to_atom_type_map:
+        H: H
+        C: C
+    - _target_: nequip.data.transforms.NeighborListTransform
+      r_max: 5.0
+    train_dataloader:
+      _target_: torch.utils.data.DataLoader
+      batch_size: 4
+      shuffle: true
+    val_dataloader:
+      _target_: torch.utils.data.DataLoader
+      batch_size: 8
+    test_dataloader:
+      _target_: torch.utils.data.DataLoader
+      batch_size: 8
+    stats_manager:
+      _target_: nequip.data.CommonDataStatisticsManager
+      type_names:
+      - H
+      - C
+      dataloader_kwargs:
+        batch_size: 8
+  trainer:
+    _target_: lightning.Trainer
+    max_epochs: 1
+    max_time: 00:01:30:00
+    check_val_every_n_epoch: 1
+    log_every_n_steps: 50
+    callbacks:
+    - _target_: lightning.pytorch.callbacks.ModelCheckpoint
+      monitor: val0_epoch/weighted_sum
+      dirpath: C:\Users\sumedh\polyframenet_data\runs\allegro_smoke
+      filename: best
+      save_top_k: 1
+      save_last: false
+    limit_train_batches: 20
+    limit_val_batches: 5
+    limit_test_batches: 5
+  global_options:
+    allow_tf32: false
+  runs:
+  - train
+  - test
+  training_module:
+    _target_: nequip.train.EMALightningModule
+    ema_decay: 0.99
+    loss:
+      _target_: nequip.train.EnergyForceLoss
+      per_atom_energy: true
+      coeffs:
+        total_energy: 20.0
+        forces: 1.0
+    val_metrics:
+      _target_: nequip.train.EnergyForceMetrics
+      coeffs:
+        per_atom_energy_mae: 1.0
+        forces_mae: 1.0
+    test_metrics:
+      _target_: nequip.train.EnergyForceMetrics
+      coeffs:
+        per_atom_energy_mae: 1.0
+        forces_mae: 1.0
+    optimizer:
+      _target_: torch.optim.Adam
+      lr: 0.001
+    lr_scheduler:
+      scheduler:
+        _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+        factor: 0.6
+        patience: 3
+      monitor: val0_epoch/weighted_sum
+      interval: epoch
+      frequency: 1
+    model:
+      _target_: allegro.model.AllegroModel
+      seed: 0
+      model_dtype: float32
+      type_names:
+      - H
+      - C
+      r_max: 5.0
+      radial_chemical_embed:
+        _target_: allegro.nn.TwoBodyBesselScalarEmbed
+        num_bessels: 8
+        bessel_trainable: false
+        polynomial_cutoff_p: 6
+      radial_chemical_embed_dim: 64
+      scalar_embed_mlp_hidden_layers_depth: 1
+      scalar_embed_mlp_hidden_layers_width: 64
+      scalar_embed_mlp_nonlinearity: silu
+      l_max: 2
+      num_layers: 2
+      num_scalar_features: 64
+      num_tensor_features: 32
+      allegro_mlp_hidden_layers_depth: 2
+      allegro_mlp_hidden_layers_width: 128
+      allegro_mlp_nonlinearity: silu
+      parity: true
+      tp_path_channel_coupling: true
+      readout_mlp_hidden_layers_depth: 1
+      readout_mlp_hidden_layers_width: 32
+      readout_mlp_nonlinearity: null
+      avg_num_neighbors: 29.665312598351115
+      per_type_energy_shifts:
+        H: -16.187927411459444
+        C: -1036.9827739687719
+      per_type_energy_scales: 0.7801176124568223
+      per_type_energy_scales_trainable: false
+      per_type_energy_shifts_trainable: false
+ema_decay: 0.99

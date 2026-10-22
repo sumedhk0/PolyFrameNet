@@ -22,8 +22,10 @@ def make_calc(kind, model, dtype="float64"):
         from mace.calculators import MACECalculator
         return MACECalculator(model_paths=model, device="cuda", default_dtype=dtype)
     if kind == "allegro":
-        from nequip.ase import NequIPCalculator
-        return NequIPCalculator.from_compiled_model(model, device="cuda")
+        # Eager checkpoint, not compiled: nequip 0.19 refuses TorchScript on torch >= 2.10
+        # and AOTInductor needs MSVC (not installed). Slower than compiled Allegro.
+        from nequip.integrations.ase import NequIPCalculator
+        return NequIPCalculator._from_saved_model(model, device="cuda")
     if kind == "deepmd":
         from deepmd.calculator import DP
         return DP(model=model)

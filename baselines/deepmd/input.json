@@ -1,12 +1,12 @@
 {
-  "_comment": "DeepMD se_e2_a baseline on the v2 hydrocarbon split. systems lists and numb_steps are filled in at launch by baselines/deepmd/README.md; loss uses DeepMD's own prefactor schedule (a disclosed deviation from E 20 / F 1).",
+  "_comment": "DeepMD se_e2_a baseline on the v2 hydrocarbon split. systems lists and numb_steps are filled in by baselines/deepmd/launch.py; sel from dp neighbor-stat (max 90 H / 67 C within 6 A); per-type energy bias is fitted by DeepMD itself, not the shared E0; loss uses DeepMD's own prefactor schedule (a disclosed deviation from E 20 / F 1).",
   "model": {
     "type_map": ["H", "C"],
     "descriptor": {
       "type": "se_e2_a",
       "rcut": 6.0,
       "rcut_smth": 0.5,
-      "sel": [60, 30],
+      "sel": [96, 72],
       "neuron": [25, 50, 100],
       "axis_neuron": 16
     },

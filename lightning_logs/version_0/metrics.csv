@@ -1,0 +1,3 @@
+epoch,step,train_loss_epoch/forces_mse,train_loss_epoch/per_atom_energy_mse,train_loss_epoch/weighted_sum,val0_epoch/forces_mae,val0_epoch/forces_maxabserr,val0_epoch/forces_rmse,val0_epoch/per_atom_energy_mae,val0_epoch/per_atom_energy_maxabserr,val0_epoch/per_atom_energy_rmse,val0_epoch/total_energy_mae,val0_epoch/total_energy_maxabserr,val0_epoch/total_energy_rmse,val0_epoch/weighted_sum
+0,19,,,,0.4637638877487488,7.948190862723246,0.7406752193793493,0.046630058240752705,0.2820504848904193,0.08230207332220739,8.015894902338369,45.853815090624266,13.62133656692679,0.25519697299475075
+0,19,0.5686781087229533,0.010641187822231023,0.037214374531789225,,,,,,,,,,
