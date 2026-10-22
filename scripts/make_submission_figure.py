@@ -35,7 +35,7 @@ def main(eval_dir: pathlib.Path, bench_dir: pathlib.Path, out: pathlib.Path):
         kind, split = f.stem.rsplit("_", 1)
         rows.setdefault(kind, {})[split] = json.loads(f.read_text())["f_mae_meV_A"]
     order = [k for k in ("v2", "mace", "allegro", "deepmd") if k in rows]
-    fig, (a, b) = plt.subplots(1, 2, figsize=(7.2, 2.8))
+    fig, (a, b) = plt.subplots(1, 2, figsize=(7.2, 2.3))
     w = 0.38
     for i, k in enumerate(order):
         for j, (split, hatch) in enumerate((("test", None), ("pe", "///"))):
@@ -49,8 +49,7 @@ def main(eval_dir: pathlib.Path, bench_dir: pathlib.Path, out: pathlib.Path):
     a.set_xticks(range(len(order)), [NAMES[k].replace("PolyFrameNet ", "PFN ") for k in order])
     a.set_yscale("log")
     a.set_ylabel("force MAE (meV/Å)")
-    a.set_title("(a) accuracy: hydrocarbon test (solid), PE test (hatched)", loc="left",
-                fontsize=9)
+    a.set_title("(a) force MAE: solid = test, hatched = PE test", loc="left", fontsize=8)
     for k in ("v1", "v2", "mace", "allegro", "deepmd"):
         pts = []
         for f in bench_dir.glob(f"speed_{k}_r*.json"):
@@ -60,13 +59,13 @@ def main(eval_dir: pathlib.Path, bench_dir: pathlib.Path, out: pathlib.Path):
         if not pts:
             continue
         pts.sort()
-        b.plot([p[0] for p in pts], [p[1] for p in pts], "-o", ms=4, color=COLORS[k],
+        b.plot([p[0] for p in pts], [p[1] for p in pts], marker="o", ms=4, color=COLORS[k],
                label=NAMES[k], linestyle="--" if k == "v1" else "-")
     b.set_xscale("log")
     b.set_yscale("log")
     b.set_xlabel("atoms (periodic PE melt)")
     b.set_ylabel("ms per energy + force call")
-    b.set_title("(b) speed, RTX 4080 Laptop, float32", loc="left", fontsize=9)
+    b.set_title("(b) time per energy+force call", loc="left", fontsize=8)
     b.legend(frameon=False, fontsize=7)
     fig.tight_layout()
     fig.savefig(out, dpi=200)
