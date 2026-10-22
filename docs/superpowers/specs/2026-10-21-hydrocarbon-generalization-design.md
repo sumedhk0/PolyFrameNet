@@ -393,3 +393,85 @@ Commit after each step.
 | Variable-block encoder too slow | Bucket blocks by size and run one encoder call per bucket. |
 | Data imbalance (aromatics dominate), PE accuracy falls | Measured by criterion 3. Report it; do not hide it. |
 | Overall time | Cut PS MD first, then the dispersion tail. Without it, nothing models attraction beyond 4.5 Å; that matters for bulk density, but little for the cluster energies in the training data. Disclosed if cut. |
+
+## Additions (2026-10-22, user request)
+
+### Block registry: training-coverage dictionary for inference
+
+This is a diagnostic only. The model never reads it, because of invariant 2: weights are
+shared, and values are never looked up.
+
+**Block identity at three levels.** Each is computed inside the block only, so it does
+not depend on the rest of the molecule:
+
+| Level | What it is | Example |
+|---|---|---|
+| L0, composition | The multiset of (Z, elements of external neighbours) | "C6H5 with one external C" |
+| L1, local | One WL round on the block's own bond graph | |
+| L2, exact | WL refined to stability | the block's isomorphism class, up to WL |
+
+**Registry contents.** It is built from the training frames and stored as
+`registry.json` next to `best.pt`. For each level it holds a count per hash. For each
+exact hash it also holds:
+- a readable label;
+- the mean and spread of the block's Stage 2 embedding H_I. That embedding is invariant,
+  because it is averaged over variants.
+
+**Inference report, per block:**
+- the highest level that matched, with its training count;
+- for an unseen exact hash, the nearest known block in embedding space and its distance
+  in units of the typical within-class spread;
+- a verdict:
+  - `seen` (L2 match);
+  - `similar` (L1 match, or embedding distance under the 95th percentile of
+    within-class distances);
+  - `novel`.
+
+**Where it surfaces:**
+- A CLI (`scripts/block_coverage.py <structure>`) prints the report.
+- The calculator can warn once per new topology.
+
+### Additional baselines: Allegro, DeepMD, UMA
+
+All three are compared with v2 and MACE on the identical hydrocarbon split, using the
+same metrics and the same evaluation code.
+
+**Isolation.** Each baseline lives in its own virtual environment
+(`$HOME/venvs/bl_<name>`). Their pinned torch versions must not touch the main
+environment's cu128 torch.
+
+**How each is used:**
+
+| Model | How | Version |
+|---|---|---|
+| Allegro | Trained from scratch on the same extxyz split, per-atom E0 shifts from the same fit, loss weights E 20 (per atom) and F 1, r_max 5.0 | nequip 0.19 / nequip-allegro 0.8 |
+| DeepMD | Trained from scratch (se_e2_a descriptor, PyTorch backend, rcut 6.0). Data converted with dpdata. | deepmd-kit 3.2 |
+| UMA | Zero-shot only, no training (uma-s, omol task, Q = 0, S from multiplicity) | fairchem-core 2.23 |
+
+**UMA details:**
+- **Absolute energies.** OMol25 used the same ωB97M-V/def2-TZVPD level as OPoly26, so
+  absolute energies are directly comparable.
+- **Possible contamination.** UMA's training set is OMol25. Whether OPoly26 frames, or the
+  MD systems they came from, are in it is not verified here. The UMA row is flagged
+  "possibly seen".
+- **Prerequisite.** The user must accept the facebook/UMA license on Hugging Face and run
+  `huggingface-cli login`.
+
+**Compute fairness.**
+- Every trained model gets 90 min of wall clock.
+- They run two at a time on the one GPU: v2 with MACE, then Allegro with DeepMD. Every
+  model shares the GPU with exactly one other. This is disclosed.
+- Single seed each. Error bars are cluster work.
+
+**Speed and stability.**
+- Each model runs through its own ASE calculator.
+- Each times energy + forces on the same exported PE melt structures (976, 7 808 and
+  26 352 atoms) and runs the same 3 ps NVE. `scripts/bench_ase.py` runs inside each
+  model's environment.
+- Every model has float64 energy summation, or the artifact is noted (v1 lesson).
+
+**Failure policy.**
+- Installing each baseline is time-boxed to 30 min.
+- If a package cannot be installed or run on this Windows machine (App Control has
+  blocked DLLs before), the writeup records the exact error, and that baseline moves to
+  the cluster run.

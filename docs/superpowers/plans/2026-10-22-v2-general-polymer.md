@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** One element-general, exactly symmetric polymer potential (v2). Its correctness gates run on any chemistry. For the hackathon it is trained and benchmarked on OPoly26 hydrocarbon frames.
+**Goal:** One element-general, exactly symmetric polymer potential (v2). Its correctness gates run on any chemistry. It ships with a block registry that flags unfamiliar chemistry at inference. For the hackathon it is trained on OPoly26 hydrocarbon frames and benchmarked against MACE, Allegro, DeepMD and UMA.
 
 **Architecture:**
 - **Blocks.** Rigid fragments cut by a graph-only rule: each ring system is one block, every other non-terminal atom is its own block, terminal atoms join their neighbour, and linear sp carbons merge with their neighbours.
@@ -75,7 +75,10 @@
 | `src/frame_potential/v2/calculator.py` | `PolyFrameNetV2Calculator` (ASE) |
 | `tests/v2_molecules.py` | Test molecules: g2, PEO-like chain, ion pair, multi-molecule clusters |
 | `tests/test_v2_graph.py`, `test_v2_longrange.py`, `test_v2_gates.py` | Tests |
-| `scripts/build_v2_dataset.py`, `scripts/export_v2_extxyz.py`, `scripts/eval_v2.py` | Data build, MACE export, accuracy comparison |
+| `src/frame_potential/v2/registry.py` | Block registry: training coverage (seen / similar / novel) per block |
+| `scripts/build_v2_dataset.py`, `scripts/export_v2_extxyz.py`, `scripts/export_melts.py` | Data build, baseline exports, benchmark structures |
+| `scripts/eval_ase.py`, `scripts/bench_ase.py`, `scripts/eval_v2_all.py`, `scripts/block_coverage.py` | Model-agnostic accuracy, speed and NVE (run inside each baseline's env), results table, coverage CLI |
+| `baselines/{allegro,deepmd}/` | Exact baseline configs and commands |
 
 ---
 
@@ -1831,7 +1834,7 @@ def main(argv=None):
     p.add_argument("--raw", type=pathlib.Path, required=True)
     p.add_argument("--config", default="hydrocarbon")
     p.add_argument("--out", type=pathlib.Path, required=True)
-    p.add_argument("--minutes", type=float, default=120.0)
+    p.add_argument("--minutes", type=float, default=90.0)
     p.add_argument("--max-epochs", type=int, default=10000)
     p.add_argument("--lr", type=float, default=5e-3)
     p.add_argument("--max-atoms", type=int, default=1000)
@@ -1937,26 +1940,297 @@ Expected:
 - The loss decreases.
 - No NaN.
 - `results.json` is written.
-- The seconds per epoch on 200 frames is recorded and used to choose `--max-atoms` and confirm the 120-min budget gives at least 20 epochs on the full train set.
+- The seconds per epoch on 200 frames is recorded and used to choose `--max-atoms` and confirm the 90-min budget gives at least 20 epochs on the full train set.
 - If fewer than 20 epochs: lower `n_frames` in `DATA_CONFIGS["hydrocarbon"]`. Record the decision in the commit message.
 
 - [ ] **Step 6: Lint and commit** ("Add v2 training loop and ASE calculator"). The message records smoke timing.
 
 ---
 
-### Task 7: MACE export and both full trainings
+### Task 6b: Block registry (training-coverage dictionary)
 
 **Files:**
-- Create: `scripts/export_v2_extxyz.py`
+- Create: `src/frame_potential/v2/registry.py`, `scripts/block_coverage.py`, `tests/test_v2_registry.py`
+- Modify:
+  - `src/frame_potential/v2/model.py`: `forward(self, batch, edges=None, lr_edges=None, capture=None)`. Right after Stage 2 computes `H`, add `if capture is not None: capture["H2"] = H.detach()`.
+  - `src/frame_potential/v2/train.py`: after training, build the registry from `train` and save it as `registry.json`.
+  - `src/frame_potential/v2/calculator.py`: optional `registry=` argument. On a new topology it warns, listing any `novel` blocks.
 
 **Interfaces:**
-- Consumes: `load_v2_frames`, `split_v2`, `pe_split_keys`, `fit_reference_general`, and v1 `frame_potential.data.to_extxyz`, which needs `.numbers .positions .forces .energy .key`. FrameV2 has these.
-- Produces: `$D/extxyz_v2/{train,val,test,pe_test}.xyz` and `e0.json`.
+- Consumes: `GraphTopology`, `_h` (graph.py), `PolyFrameNetV2(capture=...)`, `collate_v2`, v1 `make_batches`.
+- Produces:
+  - `block_hashes(topo) -> np.ndarray (B, 3) int64` (L0, L1, L2);
+  - `block_label(topo, k) -> str`;
+  - `BlockRegistry.build(model, frames, device) -> BlockRegistry`;
+  - `.report(model, topo, positions, cell=None, device="cpu") -> list[dict]`, with keys `block, label, level, count, verdict, nearest, distance`;
+  - `.save(path)`, `BlockRegistry.load(path)`.
 
-- [ ] **Step 1: Implement**
+- [ ] **Step 1: Failing tests** `tests/test_v2_registry.py`
 
 ```python
-"""Exact v2 split as extxyz for MACE, plus the shared E0 (same reference for both models)."""
+import numpy as np
+import torch
+
+from frame_potential.builders import pe_chain, pe_cluster
+from frame_potential.v2.graph import topology_from_geometry_v2
+from frame_potential.v2.model import PolyFrameNetV2
+from frame_potential.v2.registry import BlockRegistry, block_hashes
+from tests.v2_molecules import g2
+
+
+class _F:  # minimal frame for registry building
+    def __init__(self, z, p):
+        self.numbers, self.positions, self.topo = z, p, topology_from_geometry_v2(z, p)
+        self.forces, self.energy, self.charge, self.spin = np.zeros_like(p), 0.0, 0.0, 1.0
+
+
+def test_hashes_permutation_invariant(rng):
+    z, p = g2("isobutane")
+    t = topology_from_geometry_v2(z, p)
+    perm = rng.permutation(len(z))
+    t2 = topology_from_geometry_v2(z[perm], p[perm])
+    assert sorted(map(tuple, block_hashes(t).tolist())) == sorted(
+        map(tuple, block_hashes(t2).tolist()))
+
+
+def test_registry_seen_and_novel(tmp_path):
+    torch.manual_seed(0)
+    m = PolyFrameNetV2().double().eval()
+    rng = np.random.default_rng(0)
+    frames = [_F(*pe_cluster(2, 8, rng)) for _ in range(3)]
+    reg = BlockRegistry.build(m, frames, "cpu")
+    reg.save(tmp_path / "r.json")
+    reg = BlockRegistry.load(tmp_path / "r.json")
+    z, p = pe_chain(6)
+    rep = reg.report(m, topology_from_geometry_v2(z, p), p)
+    assert {r["verdict"] for r in rep} == {"seen"}
+    z, p = g2("isobutane")  # 3 CH3 (seen in PE: C + 3H, one external C) and 1 CH (3 ext C)
+    rep = reg.report(m, topology_from_geometry_v2(z, p), p)
+    verdicts = sorted(r["verdict"] for r in rep)
+    assert verdicts.count("seen") == 3 and any(v != "seen" for v in verdicts)
+    z, p = g2("C6H6")
+    rep = reg.report(m, topology_from_geometry_v2(z, p), p)
+    assert rep[0]["level"] is None and rep[0]["verdict"] != "seen"
+```
+
+- [ ] **Step 2: Run, verify fail** — `pytest tests/test_v2_registry.py -q`. Expected: ImportError.
+
+- [ ] **Step 3: Implement** `src/frame_potential/v2/registry.py`
+
+```python
+"""Block registry: which blocks the training data contained, for flagging unfamiliar
+chemistry at inference. Diagnostic only: the model never reads it (shared weights, never
+shared values). Block identity is computed inside the block, independent of context:
+  L0 composition  multiset of (Z, sorted Z of external neighbours)
+  L1 local        one WL round over the block's internal bonds
+  L2 exact        WL over internal bonds refined to stability
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+from collections import Counter
+
+import numpy as np
+import torch
+from ase.data import chemical_symbols
+
+from ..data import make_batches
+from .batch import collate_v2
+from .graph import _h
+
+LEVELS = ("L0", "L1", "L2")
+_KEEP = 200  # embeddings kept per exact class for spread statistics
+
+
+def _adjacency(topo):
+    nb = [[] for _ in range(topo.n_atoms)]
+    for a, b in topo.bonds.tolist():
+        nb[a].append(b)
+        nb[b].append(a)
+    return nb
+
+
+def block_hashes(topo) -> np.ndarray:
+    nb = _adjacency(topo)
+    out = np.zeros((topo.n_blocks, 3), dtype=np.int64)
+    for k in range(topo.n_blocks):
+        atoms = [int(a) for a in topo.block_atoms[k] if a >= 0]
+        inside = set(atoms)
+        col = {i: _h(int(topo.numbers[i]),
+                     tuple(sorted(int(topo.numbers[j]) for j in nb[i] if j not in inside)))
+               for i in atoms}
+        out[k, 0] = _h(tuple(sorted(col.values())))
+        n_cls = len(set(col.values()))
+        for rnd in range(20):
+            col = {i: _h(col[i], tuple(sorted(col[j] for j in nb[i] if j in inside)))
+                   for i in atoms}
+            if rnd == 0:
+                out[k, 1] = _h(tuple(sorted(col.values())))
+            k_new = len(set(col.values()))
+            if rnd > 0 and k_new == n_cls:
+                break
+            n_cls = k_new
+        out[k, 2] = _h(tuple(sorted(col.values())))
+    return out
+
+
+def block_label(topo, k) -> str:
+    nb = _adjacency(topo)
+    atoms = [int(a) for a in topo.block_atoms[k] if a >= 0]
+    inside = set(atoms)
+    comp = Counter(chemical_symbols[int(topo.numbers[i])] for i in atoms)
+    ext = Counter(chemical_symbols[int(topo.numbers[j])] for i in atoms for j in nb[i]
+                  if j not in inside)
+    f = "".join(f"{s}{n if n > 1 else ''}" for s, n in sorted(comp.items()))
+    e = ",".join(f"{s}{n if n > 1 else ''}" for s, n in sorted(ext.items()))
+    return f"{f}[{e}]" if e else f
+
+
+def _embeddings(model, topos, positions, device, cells=None):
+    b = collate_v2(topos, positions, cells).to(device, torch.float64)
+    cap = {}
+    m = model.to(device, torch.float64).eval()
+    with torch.no_grad():
+        m(b, capture=cap)
+    return cap["H2"].cpu().numpy()
+
+
+class BlockRegistry:
+    def __init__(self, counts, labels, means, spread, threshold):
+        self.counts, self.labels, self.means = counts, labels, means
+        self.spread, self.threshold = spread, threshold
+
+    @classmethod
+    def build(cls, model, frames, device, max_atoms=4000):
+        counts = {lv: Counter() for lv in LEVELS}
+        labels, samples = {}, {}
+        for ids in make_batches(frames, max_atoms):
+            fs = [frames[i] for i in ids]
+            H = _embeddings(model, [f.topo for f in fs], [f.positions for f in fs], device)
+            row = 0
+            for f in fs:
+                hs = block_hashes(f.topo)
+                for k in range(f.topo.n_blocks):
+                    for li, lv in enumerate(LEVELS):
+                        counts[lv][str(hs[k, li])] += 1
+                    key = str(hs[k, 2])
+                    labels.setdefault(key, block_label(f.topo, k))
+                    s = samples.setdefault(key, [])
+                    if len(s) < _KEEP:
+                        s.append(H[row + k])
+                row += f.topo.n_blocks
+        means = {k: np.mean(v, 0) for k, v in samples.items()}
+        rms = [float(np.sqrt(((np.asarray(v) - means[k]) ** 2).sum(1).mean()))
+               for k, v in samples.items() if len(v) > 1]
+        spread = float(np.median(rms)) if rms and np.median(rms) > 0 else 1.0
+        within = [np.linalg.norm(x - means[k]) / spread for k, v in samples.items() for x in v]
+        threshold = float(np.percentile(within, 95)) if within else 1.0
+        return cls({lv: dict(c) for lv, c in counts.items()}, labels, means, spread, threshold)
+
+    def report(self, model, topo, positions, cell=None, device="cpu"):
+        H = _embeddings(model, [topo], [positions], device, None if cell is None else [cell])
+        hs = block_hashes(topo)
+        keys = list(self.means)
+        M = np.stack([self.means[k] for k in keys]) if keys else np.zeros((0, H.shape[1]))
+        out = []
+        for k in range(topo.n_blocks):
+            level, count = None, 0
+            for li in (2, 1, 0):
+                c = self.counts[LEVELS[li]].get(str(hs[k, li]), 0)
+                if c:
+                    level, count = LEVELS[li], c
+                    break
+            d = np.linalg.norm(M - H[k], axis=1) / self.spread if len(M) else np.array([np.inf])
+            j = int(np.argmin(d))
+            if level == "L2":
+                verdict = "seen"
+            elif level == "L1" or float(d[j]) < self.threshold:
+                verdict = "similar"
+            else:
+                verdict = "novel"
+            out.append({"block": k, "label": block_label(topo, k), "level": level,
+                        "count": count, "verdict": verdict,
+                        "nearest": self.labels[keys[j]] if keys else None,
+                        "distance": float(d[j])})
+        return out
+
+    def save(self, path):
+        pathlib.Path(path).write_text(json.dumps({
+            "counts": self.counts, "labels": self.labels,
+            "means": {k: v.tolist() for k, v in self.means.items()},
+            "spread": self.spread, "threshold": self.threshold}))
+
+    @classmethod
+    def load(cls, path):
+        d = json.loads(pathlib.Path(path).read_text())
+        return cls(d["counts"], d["labels"], {k: np.asarray(v) for k, v in d["means"].items()},
+                   d["spread"], d["threshold"])
+```
+
+- [ ] **Step 4: Implement** `scripts/block_coverage.py`
+
+```python
+"""Print per-block training coverage for a structure: seen / similar / novel.
+Usage: python scripts/block_coverage.py <run dir with best.pt + registry.json> <structure file>"""
+
+import pathlib
+import sys
+
+import numpy as np
+from ase.io import read
+
+from frame_potential.v2.graph import topology_from_geometry_v2
+from frame_potential.v2.registry import BlockRegistry
+from frame_potential.v2.train import load_model_v2
+
+if __name__ == "__main__":
+    run, struct = pathlib.Path(sys.argv[1]), sys.argv[2]
+    at = read(struct)
+    cell = np.asarray(at.cell) if at.pbc.any() else None
+    model = load_model_v2(run / "best.pt")
+    reg = BlockRegistry.load(run / "registry.json")
+    topo = topology_from_geometry_v2(at.numbers, at.positions, cell)
+    rows = reg.report(model, topo, at.positions, cell)
+    for r in rows:
+        print(f"{r['block']:5d} {r['label']:16s} {r['verdict']:8s} level={r['level']} "
+              f"n_train={r['count']} nearest={r['nearest']} d={r['distance']:.2f}")
+    print({v: sum(r["verdict"] == v for r in rows) for v in ("seen", "similar", "novel")})
+```
+
+- [ ] **Step 5: Wire into train and calculator.**
+  - In `v2/train.py` `main`, after `bm = load_model_v2(...)`: `BlockRegistry.build(bm, train, device).save(a.out / "registry.json")`.
+  - In the calculator `__init__`, add `registry=None`.
+  - In `calculate`, when the topology is rebuilt and a registry is set: compute `report`, and if any verdict is `novel`, `warnings.warn(f"{n} novel block types: {labels}")`.
+
+- [ ] **Step 6: Run** `pytest -q`. All pass. Lint. Commit ("Add block registry: training coverage per block at inference").
+
+---
+
+### Task 7: Exports, baseline environments, trainings in two rounds
+
+**Files:**
+- Create:
+  - `scripts/export_v2_extxyz.py`;
+  - `scripts/export_melts.py`;
+  - `scripts/eval_ase.py`;
+  - `scripts/bench_ase.py`;
+  - `baselines/deepmd/input.json`;
+  - `baselines/allegro/README.md` (the exact config and commands used).
+
+**Interfaces:**
+- `$D = C:/Users/sumedh/polyframenet_data`.
+- Produces:
+  - `$D/extxyz_v2/{train,val,test,pe_test}.xyz`, `e0.json`;
+  - `$D/melts/melt_r{1,2,3}.xyz`, `melt_nve.xyz`;
+  - `$D/deepmd_v2/{train,val}/` (dpdata npy);
+  - per-model JSON metrics in `$D/runs/eval_v2/`.
+
+- [ ] **Step 1: v2 extxyz export.** `scripts/export_v2_extxyz.py`:
+
+```python
+"""Exact v2 split as extxyz for all baselines, plus the shared E0."""
 
 import json
 import pathlib
@@ -1979,97 +2253,326 @@ if __name__ == "__main__":
     print({k: len(v) for k, v in (("train", tr), ("val", va), ("test", te))}, e0[1], e0[6])
 ```
 
-- [ ] **Step 2: Run export, then commit** ("Export v2 split for MACE").
-- [ ] **Step 3: Launch both trainings in the background**, each with its own fresh output directory.
-  - **v2:** `python -m frame_potential.v2.train --raw $D/opoly26_ch --out $D/runs/v2_main --minutes 120 > $D/runs/v2_main.log 2>&1`
-  - **MACE:** run inside `$D/runs/mace_v2`. Use the v1 MACE command from `docs/writeup.md` Reproduce, with:
-    - `--train_file/--valid_file/--test_file ../../extxyz_v2/*.xyz`;
-    - `--E0s` from `extxyz_v2/e0.json`;
-    - `--max_num_epochs` chosen so the wall clock is about 120 min. Estimate it from a 1-epoch probe.
-    - Log to `../mace_v2.log`.
-  - **Before launching:** commit everything first, per the commit cadence.
-  - **Waiting:** use one background wait per job (a Monitor or until-loop), not polling.
+- [ ] **Step 2: Melt export.** `scripts/export_melts.py` writes the md_bench melts as extxyz, so every environment benchmarks identical atoms:
+
+```python
+"""Write the benchmark PE melts (md_bench.melt_atoms, tiled 1x/2x/3x) as extxyz."""
+
+import pathlib
+import sys
+
+import numpy as np
+from ase import Atoms
+from ase.io import write
+
+sys.path.insert(0, "scripts")
+from md_bench import melt_atoms  # noqa: E402
+
+from frame_potential.builders import tile  # noqa: E402
+
+if __name__ == "__main__":
+    out = pathlib.Path(sys.argv[1])
+    out.mkdir(parents=True, exist_ok=True)
+    base = melt_atoms(8, 40, 0.50, seed=1)
+    for r in (1, 2, 3):
+        z, p, c = tile(base.numbers, base.positions, np.asarray(base.cell), r)
+        write(out / f"melt_r{r}.xyz", Atoms(numbers=z, positions=p, cell=c, pbc=True))
+    write(out / "melt_nve.xyz", melt_atoms(8, 40, 0.50, seed=2))
+```
+
+- [ ] **Step 3: Generic evaluator.** `scripts/eval_ase.py` depends only on numpy, ase and the model's own package, so it runs inside any baseline environment:
+
+```python
+"""Accuracy of any ASE calculator on an extxyz split with REF_energy / REF_forces.
+Usage: python scripts/eval_ase.py <kind> <model> <split.xyz> <out.json>
+kind: v2 | mace | allegro | deepmd | uma. Runs inside that model's own environment."""
+
+import json
+import sys
+
+import numpy as np
+from ase.io import read
+
+
+def make_calc(kind, model):
+    if kind == "v2":
+        import torch
+
+        from frame_potential.v2.calculator import PolyFrameNetV2Calculator
+        from frame_potential.v2.train import load_model_v2
+        return PolyFrameNetV2Calculator(load_model_v2(model, "cuda"), "cuda", torch.float64)
+    if kind == "mace":
+        from mace.calculators import MACECalculator
+        return MACECalculator(model_paths=model, device="cuda", default_dtype="float64")
+    if kind == "allegro":
+        from nequip.ase import NequIPCalculator
+        return NequIPCalculator.from_compiled_model(model, device="cuda")
+    if kind == "deepmd":
+        from deepmd.calculator import DP
+        return DP(model=model)
+    if kind == "uma":
+        from fairchem.core import FAIRChemCalculator, pretrained_mlip
+        return FAIRChemCalculator(pretrained_mlip.get_predict_unit(model, device="cuda"),
+                                  task_name="omol")
+    raise ValueError(kind)
+
+
+if __name__ == "__main__":
+    kind, model, split, out = sys.argv[1:5]
+    calc = make_calc(kind, model)
+    e_err, f_err = [], []
+    for at in read(split, ":"):
+        e_ref, f_ref = at.info["REF_energy"], at.arrays["REF_forces"]
+        at.info["charge"], at.info["spin"] = 0, 1  # UMA omol inputs; ignored by others
+        at.calc = calc
+        e_err.append((at.get_potential_energy() - e_ref) / len(at))
+        f_err.append((at.get_forces() - f_ref).ravel())
+    e = np.asarray(e_err) * 1000
+    f = np.concatenate(f_err) * 1000
+    res = {"kind": kind, "model": model, "split": split, "n_frames": len(e_err),
+           "e_mae_meV_atom": float(np.abs(e).mean()),
+           "e_rmse_meV_atom": float(np.sqrt((e**2).mean())),
+           "f_mae_meV_A": float(np.abs(f).mean()), "f_rmse_meV_A": float(np.sqrt((f**2).mean()))}
+    with open(out, "w") as fh:
+        json.dump(res, fh, indent=1)
+    print(res)
+```
+
+The `allegro` and `deepmd` constructors must be checked against the installed API in Step 7. If a name differs, fix it there and record the change in `baselines/*/README.md`.
+
+- [ ] **Step 4: Generic speed and NVE benchmark.** `scripts/bench_ase.py` runs inside each environment. It uses the same timing rule as `md_bench.time_calc` (3 warm-ups with 1e-4 Å rattles, then the median of 20) and the same NVE (450 K, velocity Verlet, dt 0.5 fs, 6000 steps):
+
+```python
+"""Speed / NVE for any ASE calculator on exported melts, same protocol as md_bench.py.
+Usage: python scripts/bench_ase.py <kind> <model> <structure.xyz> <speed|nve> <out.json>"""
+
+import json
+import sys
+import time
+
+import numpy as np
+from ase import units
+from ase.io import read
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary, ZeroRotation
+from ase.md.verlet import VelocityVerlet
+
+sys.path.insert(0, "scripts")
+from eval_ase import make_calc  # noqa: E402
+
+
+def speed(calc, atoms):
+    atoms.calc = calc
+    for _ in range(3):
+        atoms.rattle(1e-4)
+        atoms.get_forces()
+    ts = []
+    for _ in range(20):
+        atoms.rattle(1e-4)
+        t = time.perf_counter()
+        atoms.get_forces()
+        ts.append(time.perf_counter() - t)
+    return {"n_atoms": len(atoms), "s_per_step": float(np.median(ts))}
+
+
+def nve(calc, atoms, steps=6000, dt_fs=0.5):
+    atoms.calc = calc
+    MaxwellBoltzmannDistribution(atoms, temperature_K=450, rng=np.random.default_rng(0))
+    Stationary(atoms)
+    ZeroRotation(atoms)
+    dyn = VelocityVerlet(atoms, timestep=dt_fs * units.fs)
+    t, e = [], []
+    for k in range(steps // 10):
+        dyn.run(10)
+        t.append((k + 1) * 10 * dt_fs / 1000)
+        e.append(atoms.get_total_energy() / len(atoms))
+    t, e = np.asarray(t), np.asarray(e)
+    return {"steps": steps, "drift_meV_atom_ps": float(np.polyfit(t, e, 1)[0] * 1000),
+            "e_std_meV_atom": float(np.std(e) * 1000), "trace_t_ps": t.tolist(),
+            "trace_e_eV_atom": e.tolist()}
+
+
+if __name__ == "__main__":
+    kind, model, struct, task, out = sys.argv[1:6]
+    import torch
+
+    atoms = read(struct)
+    calc = make_calc(kind, model)
+    torch.cuda.reset_peak_memory_stats()
+    try:
+        res = speed(calc, atoms) if task == "speed" else nve(calc, atoms)
+    except Exception as exc:
+        res = {"n_atoms": len(atoms), "s_per_step": None, "error": str(exc)[:300]}
+    res.update(kind=kind, peak_gpu_GB=torch.cuda.max_memory_allocated() / 1e9)
+    with open(out, "w") as fh:
+        json.dump(res, fh)
+    print({k: v for k, v in res.items() if not k.startswith("trace")})
+```
+
+`make_calc("v2")` builds the calculator in float64 for evaluation. For speed and NVE, `bench_ase.py` uses `kind == "v2"` with float32: pass `torch.float32` there, matching v1 and MACE, which ran in float32. The energy sum stays float64.
+
+- [ ] **Step 5: Run exports and commit before launching anything long.**
+
+```bash
+python scripts/export_v2_extxyz.py $D/opoly26_ch $D/extxyz_v2
+python scripts/export_melts.py $D/melts
+```
+
+Commit ("Add v2 exports and generic ASE eval/bench scripts").
+
+- [ ] **Step 6: Round 1 trainings, in the background, 90 min each.**
+  - **v2:** `python -m frame_potential.v2.train --raw $D/opoly26_ch --out $D/runs/v2_main --minutes 90 > $D/runs/v2_main.log 2>&1`
+  - **MACE:** run in `$D/runs/mace_v2`. Use the v1 MACE command from the writeup's Reproduce section, with:
+    - the `extxyz_v2` files;
+    - `--E0s` from `e0.json`;
+    - `--max_num_epochs` from a 1-epoch probe, so the wall clock is about 90 min.
+
+- [ ] **Step 7: During round 1, install the baselines.** Each environment is isolated and time-boxed to 30 min:
+
+```powershell
+uv venv --python 3.12 $HOME\venvs\bl_allegro;  & $HOME\venvs\bl_allegro\Scripts\python -m pip install nequip-allegro ase
+uv venv --python 3.12 $HOME\venvs\bl_deepmd;   & $HOME\venvs\bl_deepmd\Scripts\python -m pip install "deepmd-kit[torch]" dpdata ase
+uv venv --python 3.12 $HOME\venvs\bl_uma;      & $HOME\venvs\bl_uma\Scripts\python -m pip install fairchem-core ase
+```
+
+After each install, check that it imports and sees the GPU:
+
+```powershell
+& $HOME\venvs\bl_<name>\Scripts\python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+If torch is CPU-only, reinstall the matching CUDA wheel. On an App Control block, record the exact error and drop that baseline.
+
+- **DeepMD data.** In `bl_deepmd`, convert the extxyz split with dpdata:
+
+```python
+import dpdata
+from ase.calculators.singlepoint import SinglePointCalculator
+from ase.io import read
+
+D = "C:/Users/sumedh/polyframenet_data"
+for split in ("train", "val"):
+    ms = dpdata.MultiSystems()
+    for at in read(f"{D}/extxyz_v2/{split}.xyz", ":"):
+        at.calc = SinglePointCalculator(at, energy=at.info["REF_energy"],
+                                        forces=at.arrays["REF_forces"])
+        ms.append(dpdata.LabeledSystem(at, fmt="ase/structure"))
+    ms.to_deepmd_npy(f"{D}/deepmd_v2/{split}")
+```
+
+- **DeepMD config.** `baselines/deepmd/input.json`:
+
+```json
+{
+  "model": {
+    "type_map": ["H", "C"],
+    "descriptor": {"type": "se_e2_a", "rcut": 6.0, "rcut_smth": 0.5, "sel": [60, 30],
+                   "neuron": [25, 50, 100], "axis_neuron": 16},
+    "fitting_net": {"neuron": [240, 240, 240]}
+  },
+  "learning_rate": {"type": "exp", "start_lr": 1e-3, "stop_lr": 3e-8, "decay_steps": 5000},
+  "loss": {"type": "ener", "start_pref_e": 0.02, "limit_pref_e": 1, "start_pref_f": 1000,
+           "limit_pref_f": 1},
+  "training": {
+    "training_data": {"systems": "DEEPMD_V2/train", "batch_size": "auto"},
+    "validation_data": {"systems": "DEEPMD_V2/val", "batch_size": 1},
+    "numb_steps": 400000, "disp_freq": 1000, "save_freq": 10000
+  }
+}
+```
+
+- `DEEPMD_V2` is replaced with `$D/deepmd_v2` at launch. dpdata's MultiSystems writes one subfolder per formula, so `systems` takes the list of those subfolders.
+- `numb_steps` is set from a 2-min step-rate probe to fill 90 min.
+- Train with `python -m deepmd --pt train input.json`, then freeze with `python -m deepmd --pt freeze -o model.pth`.
+- DeepMD's own prefactor loss schedule is used instead of a fixed E 20 / F 1. That is a disclosed deviation, because the schedule is part of DeepMD's recommended recipe.
+
+- **Allegro config.** Start from the tutorial config shipped with nequip-allegro. Locate it from the installed package (`python -c "import allegro, pathlib; print(pathlib.Path(allegro.__file__).parent)"`, then search for `*.yaml`). Set:
+  - the data to the `extxyz_v2` files, with key mapping `REF_energy` → total energy and `REF_forces` → forces;
+  - chemical symbols [H, C];
+  - per-type energy shifts from `e0.json`;
+  - r_max 5.0;
+  - loss: per-atom energy MSE × 20 + force MSE × 1;
+  - a 90-min wall-clock limit.
+
+  Write the final config and the exact train and compile commands into `baselines/allegro/README.md` and commit it. Compile the best checkpoint for the ASE calculator as the package documents, and fix `make_calc("allegro")` to match.
+
+- **UMA access.** The user must have accepted the facebook/UMA license and run `huggingface-cli login`. Verify with `python -c "from fairchem.core import pretrained_mlip; pretrained_mlip.get_predict_unit('uma-s-1p1', device='cuda')"`. If the model name differs in the installed fairchem, use the one listed by `pretrained_mlip.available_models`.
+
+- **Smoke tests.** Allegro and DeepMD get a 2-min smoke train. UMA gets a 5-frame eval with `eval_ase.py` on `pe_test.xyz`.
+
+- [ ] **Step 8: Round 2 trainings (Allegro and DeepMD, 90 min each, concurrent)** after round 1 finishes. Commit the configs first.
 
 ---
 
 ### Task 8: Evaluation, benchmarks, writeup
 
 **Files:**
-- Create: `scripts/eval_v2.py`
-- Modify: `scripts/md_bench.py` (add `v2` to `--model` choices and to `make_calc`), `docs/writeup.md` (new §8 "v2: general architecture"), `README.md` (layout rows for `v2/`)
+- Modify: `docs/writeup.md` (new §8), `README.md` (v2 layout rows, baselines folder)
+- Create: `scripts/eval_v2_all.py`, `docs/results/v2/`
 
-- [ ] **Step 1: Implement** `scripts/eval_v2.py`
+- [ ] **Step 1: Accuracy.** For each model, run in its own environment:
+
+```bash
+python scripts/eval_ase.py <kind> <model> $D/extxyz_v2/test.xyz    $D/runs/eval_v2/<kind>_test.json
+python scripts/eval_ase.py <kind> <model> $D/extxyz_v2/pe_test.xyz $D/runs/eval_v2/<kind>_pe.json
+```
+
+- `<kind>` is each of v2, mace, allegro, deepmd and uma.
+- Also run v1 (trained on PE only) on its own PE test set with `frame_potential.train.evaluate`. Write it to `$D/runs/eval_v2/v1_pe.json` in the same format.
+
+- [ ] **Step 2: `scripts/eval_v2_all.py`.**
 
 ```python
-"""v2 vs MACE (v2 split) on the hydrocarbon test set, plus v1 / v2 / MACE-v1 on v1's PE
-test frames (does generality cost accuracy on PE?). All float64."""
+"""Merge per-model eval JSONs into one table (markdown + json)."""
 
 import json
 import pathlib
 import sys
 
-from frame_potential.data import load_pe_frames, split_by_system
-from frame_potential.train import evaluate, load_model
-from frame_potential.v2.data import load_v2_frames, pe_split_keys, split_v2
-from frame_potential.v2.train import evaluate_v2, load_model_v2
-from scripts.eval_compare import mace_metrics
-
 if __name__ == "__main__":
-    raw, v2_ck, mace_v2, v1_ck, mace_v1, out = map(pathlib.Path, sys.argv[1:7])
-    frames = load_v2_frames(raw, "hydrocarbon", cache=raw / "v2_hydrocarbon.pkl")
-    pe_split = pe_split_keys(raw)
-    _, _, test = split_v2(frames, pe_split)
-    pe_test_v2 = [f for f in test if f.key in pe_split[2]]
-    _, _, pe_test_v1 = split_by_system(load_pe_frames(raw, raw / "pe_frames.pkl"), seed=0)
-    m2 = load_model_v2(v2_ck, "cuda")
-    res = {
-        "hydrocarbon_test": {"v2": evaluate_v2(m2, test, "cuda"),
-                             "mace_v2": mace_metrics(mace_v2, test)},
-        "pe_test": {"v2": evaluate_v2(m2, pe_test_v2, "cuda"),
-                    "mace_v2": mace_metrics(mace_v2, pe_test_v2),
-                    "v1": evaluate(load_model(v1_ck, "cuda"), pe_test_v1, "cuda"),
-                    "mace_v1": mace_metrics(mace_v1, pe_test_v1)},
-    }
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "accuracy_v2.json").write_text(json.dumps(res, indent=1))
-    print(json.dumps(res, indent=1))
+    d = pathlib.Path(sys.argv[1])
+    rows = {}
+    for f in sorted(d.glob("*_*.json")):
+        kind, split = f.stem.rsplit("_", 1)
+        rows.setdefault(kind, {})[split] = json.loads(f.read_text())
+    (d / "all.json").write_text(json.dumps(rows, indent=1))
+    nan = float("nan")
+    print("| model | test E MAE | test F MAE | PE E MAE | PE F MAE |\n|---|---|---|---|---|")
+    for k, v in rows.items():
+        t, p = v.get("test", {}), v.get("pe", {})
+        print(f"| {k} | {t.get('e_mae_meV_atom', nan):.3f} | {t.get('f_mae_meV_A', nan):.2f} | "
+              f"{p.get('e_mae_meV_atom', nan):.3f} | {p.get('f_mae_meV_A', nan):.2f} |")
 ```
 
-The scripts directory must be importable for `from scripts.eval_compare import ...`. If it isn't, copy `mace_metrics` into `eval_v2.py` instead. Check with a quick run.
+- [ ] **Step 3: Speed and NVE.** For each model, run `bench_ase.py` with speed on `melt_r1/2/3.xyz` and with nve on `melt_nve.xyz`.
+  - One process per measurement.
+  - One measurement on the GPU at a time.
+  - Nothing else training at the same time.
+  - Also time v2 once with `use_coulomb=False`, to report the Ewald share. Load the checkpoint, set `model.use_coulomb = False`, and time it in a short inline script that reuses `bench_ase.speed`.
+  - v1 and MACE speeds are reused from `docs/results/md/`, which used the same protocol.
+- [ ] **Step 4: Block registry demo.** Run `scripts/block_coverage.py` on:
+  - a PE melt (all seen);
+  - an aromatic test cluster;
+  - the heteroatom g2 cluster written to xyz (novel blocks flagged).
 
-- [ ] **Step 2: md_bench v2 support.** In `scripts/md_bench.py`:
-  - change `choices=["ours", "mace"]` to `["ours", "v2", "mace"]`;
-  - add `--v2` (path) to argparse;
-  - in `make_calc` add:
+  Put the outputs in the writeup.
+- [ ] **Step 5: Writeup §8.** Cover:
+  - the v2 design and data composition;
+  - the gate table, including the heteroatom molecules and the oracle;
+  - the registry;
+  - an accuracy table with all models on test and on PE test;
+  - speed and memory per model;
+  - NVE per model.
 
-```python
-    if model == "v2":
-        from frame_potential.v2.calculator import PolyFrameNetV2Calculator
-        from frame_potential.v2.train import load_model_v2
-        return PolyFrameNetV2Calculator(load_model_v2(v2_path, "cuda", getattr(torch, dtype)), "cuda")
-```
+  Disclose, for fairness:
+  - the 90-min budgets, with GPU sharing in pairs;
+  - single seeds;
+  - DeepMD's own loss schedule;
+  - UMA zero-shot, with possible contamination;
+  - MACE without cuEquivariance;
+  - any baseline that failed to install, with its error.
 
-  `make_calc` gains a `v2_path` argument, and `main` passes `a.v2`.
-
-- [ ] **Step 3: Run benchmarks after the trainings finish.**
-  - `eval_v2.py`.
-  - Speed for v2 at reps 1, 2 and 3 on the PE melt.
-  - Speed for v2 with Coulomb on, which includes Ewald, and record the Ewald share by timing once with `use_coulomb=False`.
-  - NVE for v2 (6000 steps, dt 0.5 fs).
-  - **Aromatic MD:** the spec asks for a polystyrene system. Use a large aromatic-rich OPoly26 test cluster for a 2000-step NVE with v2 and MACE. This is a disclosed deviation from "polystyrene melt": no PS melt builder exists.
-  - One process per measurement, as in v1.
-
-- [ ] **Step 4: Writeup.** Add §8 to `docs/writeup.md`:
-  - design (block rule, colour variants, encoder, Stage 5);
-  - data composition;
-  - gate table, including the heteroatom molecules and the true oracle;
-  - accuracy table (v2 vs MACE; PE: v1, v2, MACE);
-  - speed and NVE;
-  - limitations: untrained heteroatom chemistry, Ewald cost at large N, no stress, cluster-only training data.
-
-  Run an independent fact-check agent over the new section before committing. Fix its findings.
-
-- [ ] **Step 5: Commit and push** ("Add v2 results, benchmarks and writeup").
+  Run an independent fact-check agent and fix its findings.
+- [ ] **Step 6: Commit and push** ("Add v2 results: accuracy, speed, NVE vs MACE, Allegro, DeepMD, UMA").
 
 ---
 
@@ -2088,12 +2591,15 @@ The scripts directory must be importable for `from scripts.eval_compare import .
   | Training | Task 6 |
   | MACE baseline | Task 7 |
   | Gates incl. oracle and negative control | Task 4 |
+  | Block registry | Task 6b |
+  | Baselines: Allegro, DeepMD, UMA | Task 7 (environments, configs, two training rounds) and Task 8 (evaluation) |
   | Benchmarks and writeup | Task 8 |
 
 - **Deviations from the spec, all deliberate:**
   - The block-size cap rejects rather than splits. Ring-ring single bonds are bridges, so the block rule already cuts them, and only fused systems can exceed the cap.
   - Training is `v2/train.py`, not a flag on v1's `train.py`, which keeps v1 untouched.
   - The polystyrene MD becomes an aromatic OPoly26 cluster (Task 8).
+  - The training budget is 90 min, not 120, so four trained models fit before the deadline in two concurrent pairs.
 - **Type consistency:**
   - `var_cab`/`var_m`/`var_block`, `ev_*` and `av_*` names are identical across graph, batch, model and gates.
   - `collate_v2` signature is the same everywhere.
