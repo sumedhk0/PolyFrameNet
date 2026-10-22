@@ -16,11 +16,16 @@ import numpy as np
 from ..data import load_pe_frames, split_by_system, system_key
 from ..topology import TopologyError
 from .batch import collate_v2
-from .graph import GraphTopology, topology_from_geometry_v2
+from .graph import GraphTopology, min_frame_sin, topology_from_geometry_v2
 from .model import N_ELEM
 
 # n_extra: frames drawn (by whole system) from systems outside v1's PE systems. Every
 # frame of v1's PE systems is always included (they keep their v1 split, so no leak).
+# Frames whose worst frame variant is closer to collinear than this are dropped. One
+# training frame (a CH3 with an H at 180 degrees to its C-C bond) had sin = 0 and gave
+# ~1e4 eV/A forces once per epoch, which wrecked training; every other frame has >= 0.64.
+MIN_FRAME_SIN = 0.3
+
 DATA_CONFIGS = {
     "hydrocarbon": {"elements": {1, 6}, "n_extra": 1500},
     "all": {"elements": None, "n_extra": None},
@@ -79,6 +84,11 @@ def pe_split_keys(raw: pathlib.Path):
 
 
 def load_v2_frames(raw: pathlib.Path, config: str, seed: int = 0, cache=None):
+    frames = _load_v2_frames(raw, config, seed, cache)
+    return [f for f in frames if min_frame_sin(f.topo, f.positions) >= MIN_FRAME_SIN]
+
+
+def _load_v2_frames(raw: pathlib.Path, config: str, seed: int = 0, cache=None):
     if cache is not None and pathlib.Path(cache).exists():
         return pickle.loads(pathlib.Path(cache).read_bytes())
     cfg = DATA_CONFIGS[config]

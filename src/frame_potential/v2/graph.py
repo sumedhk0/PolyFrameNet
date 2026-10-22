@@ -263,3 +263,20 @@ def attach_rows(topo: GraphTopology) -> GraphTopology:
 
 def topology_from_geometry_v2(numbers, positions, cell=None) -> GraphTopology:
     return build_graph_topology(numbers, infer_bonds_general(numbers, positions, cell))
+
+
+def min_frame_sin(topo: GraphTopology, positions, cell=None) -> float:
+    """Smallest sin(a-c-b) over all framed variants: how close the worst frame is to
+    collinear (singular). Bond angles of sp2/sp3 centres keep this near 0.8-1.0; a
+    distorted geometry (e.g. an H bonded at 180 degrees to a C-C bond) drives it to 0,
+    where the frame and every force through it blow up. Used for data curation only."""
+    framed = topo.var_cab[:, 0] >= 0
+    if not framed.any():
+        return 1.0
+    c, a, b = topo.var_cab[framed].T
+    p = np.asarray(positions, dtype=np.float64)
+    va = _mic(p[a] - p[c], cell)
+    vb = _mic(p[b] - p[c], cell)
+    s = np.linalg.norm(np.cross(va, vb), axis=1) / (
+        np.linalg.norm(va, axis=1) * np.linalg.norm(vb, axis=1))
+    return float(s.min())

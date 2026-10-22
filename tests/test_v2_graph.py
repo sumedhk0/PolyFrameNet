@@ -146,3 +146,16 @@ def test_collate_offsets():
     assert int(b.ev_var.max()) < len(b.var_block) and int(b.av_atom.max()) == b.n_atoms - 1
     assert b.block_atoms.shape[1] == max(t1.block_atoms.shape[1], t2.block_atoms.shape[1])
     assert b.charge.tolist() == [0.0, 0.0] and b.spin.tolist() == [1.0, 1.0]
+
+
+def test_min_frame_sin_flags_collinear_variant():
+    from frame_potential.v2.graph import min_frame_sin
+
+    z, p = g2("CH4")
+    t = topology_from_geometry_v2(z, p)
+    assert min_frame_sin(t, p) > 0.9  # tetrahedral: sin(109.5) = 0.94
+    q = p.copy()
+    h = [i for i in range(len(z)) if z[i] == 1]
+    q[h[1]] = 2 * q[0] - q[h[0]]  # put one H exactly opposite another: collinear pair
+    t = topology_from_geometry_v2(z, q)
+    assert min_frame_sin(t, q) < 1e-6
