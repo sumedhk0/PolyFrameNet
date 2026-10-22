@@ -32,6 +32,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]  # shared test helpers (tests/v2_molecules.py)
 # importlib mode: test files in different folders may share a basename.
 addopts = ["--import-mode=importlib", "-ra", "--strict-markers"]
 # An xfail that starts passing is a signal to investigate, not a free pass.
