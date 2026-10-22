@@ -8,3 +8,4 @@ __pycache__/
 .vscode/
 .superpowers/
 ".superpowers/"  
+lightning_logs/
