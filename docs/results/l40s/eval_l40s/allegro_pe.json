@@ -1,0 +1,10 @@
+{
+ "kind": "allegro",
+ "model": "/home/skothari67/pfn_data/runs/allegro_v2/best.ckpt",
+ "split": "/home/skothari67/pfn_data/extxyz_v2/pe_test.xyz",
+ "n_frames": 77,
+ "e_mae_meV_atom": 0.6868695434992765,
+ "e_rmse_meV_atom": 0.8562611568307802,
+ "f_mae_meV_A": 23.578657057522236,
+ "f_rmse_meV_A": 32.98160491799642
+}

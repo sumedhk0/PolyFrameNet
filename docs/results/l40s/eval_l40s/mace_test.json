@@ -1,0 +1,10 @@
+{
+ "kind": "mace",
+ "model": "/home/skothari67/pfn_data/runs/mace_l40s/mace_v2.model",
+ "split": "/home/skothari67/pfn_data/extxyz_v2/test.xyz",
+ "n_frames": 782,
+ "e_mae_meV_atom": 0.7610460100305251,
+ "e_rmse_meV_atom": 1.189220275568073,
+ "f_mae_meV_A": 19.660411302409738,
+ "f_rmse_meV_A": 33.32748602048787
+}

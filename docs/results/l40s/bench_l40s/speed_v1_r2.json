@@ -1,0 +1,1 @@
+{"n_atoms": 7808, "s_per_step": 0.033776008524000645, "kind": "v1", "model": "models/polyframenet_v1_pe.pt", "peak_gpu_GB": 1.062960128}

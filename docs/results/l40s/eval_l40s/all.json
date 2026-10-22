@@ -1,0 +1,46 @@
+{
+ "mace": {
+  "pe": {
+   "kind": "mace",
+   "model": "/home/skothari67/pfn_data/runs/mace_l40s/mace_v2.model",
+   "split": "/home/skothari67/pfn_data/extxyz_v2/pe_test.xyz",
+   "n_frames": 77,
+   "e_mae_meV_atom": 0.3931535935769782,
+   "e_rmse_meV_atom": 0.47177854216473936,
+   "f_mae_meV_A": 10.646300169310061,
+   "f_rmse_meV_A": 15.38627197735918
+  },
+  "test": {
+   "kind": "mace",
+   "model": "/home/skothari67/pfn_data/runs/mace_l40s/mace_v2.model",
+   "split": "/home/skothari67/pfn_data/extxyz_v2/test.xyz",
+   "n_frames": 782,
+   "e_mae_meV_atom": 0.7610460100305251,
+   "e_rmse_meV_atom": 1.189220275568073,
+   "f_mae_meV_A": 19.660411302409738,
+   "f_rmse_meV_A": 33.32748602048787
+  }
+ },
+ "v2": {
+  "pe": {
+   "kind": "v2",
+   "model": "/home/skothari67/pfn_data/runs/v2_l40s/best.pt",
+   "split": "/home/skothari67/pfn_data/extxyz_v2/pe_test.xyz",
+   "n_frames": 77,
+   "e_mae_meV_atom": 0.4253166276451564,
+   "e_rmse_meV_atom": 0.5419631970542164,
+   "f_mae_meV_A": 18.53004706237202,
+   "f_rmse_meV_A": 26.379507414516894
+  },
+  "test": {
+   "kind": "v2",
+   "model": "/home/skothari67/pfn_data/runs/v2_l40s/best.pt",
+   "split": "/home/skothari67/pfn_data/extxyz_v2/test.xyz",
+   "n_frames": 782,
+   "e_mae_meV_atom": 1.1849214646017683,
+   "e_rmse_meV_atom": 1.7654363792005732,
+   "f_mae_meV_A": 43.3869132431453,
+   "f_rmse_meV_A": 91.64041099110776
+  }
+ }
+}

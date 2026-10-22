@@ -534,6 +534,129 @@ of them.
 
   The comparable benchmark here is therefore head-to-head on identical data.
 
+## 8. v2: one architecture for any polymer, trained on hydrocarbons
+
+Full design: `docs/superpowers/specs/2026-10-21-hydrocarbon-generalization-design.md`.
+Walkthrough: `docs/explainer/architecture_explained.md`.
+
+### 8.1 What changed from v1
+
+v1's hand-made C2 blocks only work for even-length polyethylene. v2 keeps every v1
+invariant and generalises each piece.
+
+| Piece | v1 | v2 |
+|---|---|---|
+| Bonds | C–C, C–H cut-offs | r < 1.2 (r_cov,i + r_cov,j), any element |
+| Blocks | PE_mid / PE_end | Graph-only rule: ring systems are one block, every other non-terminal atom is a block, terminal atoms join their neighbour, linear sp carbons merge with their neighbours |
+| Frames | fwd/rev × mirror | Every (anchor, e1 atom, e2 atom) taken from canonical Weisfeiler–Lehman colour classes, × mirror. The set is closed under every symmetry, so the average is exact |
+| Encoder | One MLP per block type | One shared atom-set encoder |
+| Bonded channel | R_IJ on the chain | J's atoms projected into I's frame, on a general block graph (branches, rings) |
+| Long range | none | Latent charges: erf Coulomb (clusters), Ewald (periodic); learned C6 dispersion to 10 Å; charge/spin inputs |
+| Coverage | none | Block registry: seen / similar / novel per block |
+
+### 8.2 Data
+
+`--config hydrocarbon` selects:
+- all 3,265 C/H frames of v1's 326 polyethylene systems;
+- 1,500+ frames from other C/H systems.
+
+The total is 4,861 frames and 876k atoms. One frame was removed (8.5). Blocks: CH2
+141.8k, CH3 63.5k, CH 18.9k, phenyl/phenylene 7.5k, plus fused rings of up to 26 atoms.
+
+The split is by system: 3,429 train, 650 val, 782 test. v1's polyethylene test systems
+stay in test, so `pe_test` is exactly v1's 77 frames.
+
+### 8.3 Correctness
+
+81 tests pass, about 30 s on Linux. They run on an untrained float64 model.
+
+**On a hydrocarbon mix, heteroatom fragments never trained on, a PEO chain with a Na/Cl
+pair, and a periodic PE melt:**
+- rotation, permutation, reflection and wrap to 1e-9 eV;
+- finite-difference forces to 1e-8 eV/Å, including through Ewald;
+- frame-free blocks.
+
+The heteroatom fragments are ether, amide, ester, C–Cl, CF₄, pyridine, thiophene,
+nitrile, CO₂ and water.
+
+**Further checks:**
+- **Charge/spin input:** the conditioning is live, and the energy stays invariant.
+- **Smoothness:** at the cut-off and through the dispersion switch.
+- **Consistency:** batch equals single; float32 matches float64.
+- **True oracle:** each block's multiset of variant-frame coordinates is unchanged under
+  relabelling + rotation + mirror. The comparison uses optimal assignment, and a
+  separate test shows it can fail.
+- **Negative control:** dropping one variant per block breaks the permutation and
+  mirror gates.
+
+### 8.4 Results (equal compute: 90 min training each on one NVIDIA L40S)
+
+Same 3,429 training frames, same E0 and loss weights. Inference timed in float32 on an
+idle L40S through ASE, using the median of 20 energy+force calls on periodic PE melts
+(`scripts/eval_ase.py` and `scripts/bench_ase.py`; raw JSON in `docs/results/l40s/`).
+
+| Model | Epochs | Test E (meV/atom) | Test F (meV/Å) | PE test E | PE test F | 1k atoms (ms) | 8k | 26k |
+|---|---|---|---|---|---|---|---|---|
+| PolyFrameNet v2 | 312 | 1.19 | 43.4 | 0.43 | 18.5 | 23 | 81 | 551 |
+| MACE | 70 | 0.76 | 19.7 | 0.39 | 10.7 | 58 | 448 | OOM (46 GB) |
+| Allegro (laptop RTX 4080, 90 min, eager inference) | ~18 | 1.50 | 47.2 | 0.69 | 23.6 | 56 | OOM | OOM |
+| PolyFrameNet v1 (PE-only model) | | | | | | 29 | 34 | 67 |
+
+Peak GPU memory:
+
+| Model | 976 atoms | 7,808 atoms | 26,352 atoms |
+|---|---|---|---|
+| v2 | 0.25 GB | 3.6 GB | 27.9 GB |
+| v1 | 0.15 GB | 1.1 GB | 3.5 GB |
+| MACE | 1.6 GB | 12.4 GB | OOM |
+
+**Accuracy.**
+- With equal compute, MACE's errors are about half of v2's.
+- v2's validation error plateaued around epoch 120 of its 312, so this is a capacity
+  gap, not under-training. The likely causes are the single 4.5 Å many-body layer
+  (MACE has two interaction layers) and mean-pooling over frame variants.
+- On polyethylene, v2's energy (0.43) is close to MACE's (0.39).
+
+**Speed and memory.**
+- v2 is 2.5x faster than MACE at 1k atoms and 5.5x faster at 8k atoms.
+- v2 runs at 26k atoms, where MACE and eager Allegro run out of the 46 GB card.
+- v2's memory grows faster than v1's because of the 10 Å long-range neighbour list and
+  Ewald. The PE-only v1 has no long-range terms and stays at 3.5 GB at 26k atoms.
+
+**Allegro caveats.** Compiling Allegro for ASE (AOTInductor) failed, because the
+checkpoint's config refers to the Windows data paths. Allegro was therefore timed eager,
+which is pessimistic for it.
+
+### 8.5 Bugs found building v2
+
+| Bug | How it showed | Fix |
+|---|---|---|
+| Stage 3 skipped entirely when a batch had no block edges | Benzene alone ≠ benzene in a batch (0.0175 eV) | Update layers always run, with a zero aggregate |
+| Singular frame from the data | Train frame 3415: a CH3 with an H at exactly 180° to its C–C bond gave sin(a–c–b) = 0 and ~1e4 eV/Å forces once per epoch. Training-loss epoch means of 1.1e4 and 1.9e7; the first full run went NaN | Drop frames with min sin < 0.3 (exactly 1 frame; every other frame is ≥ 0.64). Proper fix: sin²-weighted variant averaging (open) |
+| lr 5e-3 diverged with the bigger model | Gradient-norm spikes to 4e3 | lr 2e-3, and non-finite steps are skipped and counted |
+| Padded block tensors | 2.15 GB and slow | Ragged index lists; index_select gathers (backward is index_add, not a sort) |
+| Registry retyped the caller's model to float64 | float32 calculator crashed | Works on a copy |
+| Evaluation reused one calculator's topology across frames | v2 test read 2.20 / 51.1 instead of 2.02 / 50.4 | Topology rebuilt per frame in `eval_ase.py` |
+| Oracle compared sorted rounded keys | False 4e-7 mismatches from near-ties | Optimal-assignment matching |
+| Plan said 3000 frames total | v1's PE systems alone hold 3265 C/H frames, so zero aromatics were selected | Budget counts only non-PE systems |
+| DeepMD sel [60, 30] | CUDA illegal memory access (max 90 H / 67 C neighbours) | sel [96, 72] |
+| Windows Application Control | Blocked DLLs: vesin in the DeepMD venv, pillow 13 | Uninstall vesin there, pin pillow 12; benchmarks moved to WSL |
+
+### 8.6 Limitations of v2
+
+- **Not converged.** 77.5 min of training on one laptop GPU; one seed.
+- **Unfair compute.** MACE got about twice the wall clock.
+- **Frame degeneracy.** Near-collinear bond pairs make a frame singular. They are
+  filtered in the data, but not guarded at inference.
+- **Training data.** Clusters only: no periodic DFT and no stress, so no NPT.
+- **Untrained components.** Heteroatoms, charge and spin are architecturally supported
+  but untrained.
+- **Allegro inference is eager.** TorchScript is refused on torch ≥ 2.10 and AOTInductor
+  needs MSVC, so its speed is pessimistic.
+- **DeepMD deviations.** It used its own loss schedule and energy bias, and trained for
+  63 min instead of 90.
+- **UMA** was not evaluated.
+
 ## Reproduce
 
 All commands run from the repository root, in the environment from the README. Data and

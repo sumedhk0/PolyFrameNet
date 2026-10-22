@@ -1,0 +1,10 @@
+{
+ "kind": "v2",
+ "model": "/home/skothari67/pfn_data/runs/v2_l40s/best.pt",
+ "split": "/home/skothari67/pfn_data/extxyz_v2/test.xyz",
+ "n_frames": 782,
+ "e_mae_meV_atom": 1.1849214646017683,
+ "e_rmse_meV_atom": 1.7654363792005732,
+ "f_mae_meV_A": 43.3869132431453,
+ "f_rmse_meV_A": 91.64041099110776
+}

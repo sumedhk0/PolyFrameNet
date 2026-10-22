@@ -1,87 +1,70 @@
 # PolyFrameNet: a polymer potential that knows what a polymer is
 
-**Code:** https://github.com/sumedhk0/PolyFrameNet (MIT) · **Data:** OPoly26 (ωB97M-V/def2-TZVPD)
+**Code:** https://github.com/sumedhk0/PolyFrameNet (MIT) · **Data:** OPoly26 polymer clusters, ωB97M-V/def2-TZVPD
 
 ## Problem
 
 Polymer simulation needs quantum accuracy at the scale of tens of thousands of atoms.
-General machine-learned potentials such as MACE get the accuracy by carrying equivariant
-tensor features on every edge. That is expensive, and on a 12 GB GPU MACE runs out of
-memory near 8,000 atoms. Polymers have exploitable structure: a small vocabulary of
-repeating units, a covalent graph that never changes, and a backbone that defines local
-directions. Generic models discard all three.
+General machine-learned potentials such as MACE carry equivariant tensor features on
+every edge. That makes them expensive in time and memory: on a 46 GB L40S, MACE runs out
+of memory on a 26k-atom polymer melt. Polymers have structure such models ignore: a few
+repeating building blocks, a covalent graph that never changes, and bonded atoms that
+define local directions.
 
 ## Approach
 
-PolyFrameNet reads the bond graph once and cuts it into **rigid blocks**:
-- each ring system is one block;
-- every other heavy atom is a block;
-- terminal atoms join their neighbour's block.
+**Blocks.** PolyFrameNet reads the bond graph once and cuts it into rigid blocks: each
+ring system is one block, each other heavy atom is a block, and terminal atoms join their
+neighbour. The rule uses graph structure only, so the cut is unique on any fragment.
 
-The rule uses graph structure only, so it is unique on any fragment. Each block gets
-local orthonormal **frames** built from its bonded atoms. Vectors expressed in a frame
-are rotation-invariant, so every network is a plain MLP: no tensor products.
+**Frames.** Each block gets orthonormal frames from its bonded atoms. Vectors expressed in
+a frame are rotation-invariant, so every network is a plain MLP, with no tensor products.
 
-The usual failure of frame methods is choosing the frame. A frame picked by "nearest
-atom" jumps discontinuously and breaks energy conservation. We never pick: every stage
-averages over all frames drawn from **Weisfeiler–Lehman colour classes** of the bond
-graph. That set is closed under every rotation, reflection and relabelling, so the
-energy is *exactly* O(3)- and permutation-invariant. Forces are exact gradients.
+**No frame selection.** Frame methods usually fail at the choice of frame: one picked by
+geometry ("nearest atom") jumps and breaks energy conservation. Instead, every stage
+*averages* over all frames drawn from Weisfeiler–Lehman colour classes of the bond graph.
+That set is closed under rotation, reflection and relabelling, so the energy is exactly
+O(3)- and permutation-invariant, and forces are exact gradients.
 
-Pipeline:
-1. shared block encoder;
-2. 3 message-passing layers on the sparse block graph;
-3. a learned valence prior;
-4. one 4.5 Å many-body layer;
-5. latent-charge electrostatics (Ewald) and a learned dispersion tail;
-6. charge/spin conditioning.
-
-The architecture handles any element and any non-reactive polymer; only the training
-data changes.
+**Model.** A shared block encoder, 3 message-passing layers on the sparse block graph, a
+learned valence prior, one 4.5 Å many-body layer, latent-charge electrostatics (Ewald) with
+a dispersion tail, and charge/spin inputs. It accepts any element; only the training data
+changes.
 
 ## Results
 
-All models use identical system-level splits and the same reference energies, on an RTX
-4080 Laptop GPU.
+All models: the same 3,429 hydrocarbon training frames (split by MD system), the same
+reference energies, and **90 min of training each on one NVIDIA L40S**. Inference was
+measured in float32 on an idle L40S through ASE.
 
 ![results](../figures/submission.png)
 
-| Force MAE (meV/Å) | Hydrocarbon test (782) | PE test (77) | Train time |
-|---|---|---|---|
-| **PolyFrameNet v2** | 50.4 | 24.1 | 77.5 min |
-| MACE | 27.0 | 16.5 | ~150 min |
-| Allegro | ALLEGRO_TEST | ALLEGRO_PE | 90 min |
-| DeepMD | 211 | 175 | 63 min |
+| | Test F MAE (meV/Å) | Test E MAE (meV/atom) | PE test F MAE | 1k atoms (ms/step) | 8k atoms | 26k atoms |
+|---|---|---|---|---|---|---|
+| **PolyFrameNet v2** | 43.4 | 1.19 | 18.5 | **23** | 81 | 551 |
+| MACE | **19.7** | **0.76** | **10.7** | 58 | 448 | out of memory |
+| Allegro* | 47.2 | 1.50 | 23.6 | 56 | out of memory | out of memory |
+| PolyFrameNet v1 (PE only) | – | – | 13.7† | 29 | **34** | **67** |
 
-- **v1 (polyethylene only).** It ties MACE: 13.71 vs 13.73 meV/Å force MAE.
-  - It is 2.3× faster at 1k atoms.
-  - At 7.8k atoms MACE spills past the 12 GB card and is 87× slower; v1 uses 1.1 GB.
-  - At 26k atoms v1 runs in 3.5 GB, where MACE's peak allocation is 41.6 GB.
-- **v2 (general architecture, trained on 3,429 hydrocarbon frames)** currently trails
-  MACE in accuracy. Its training was cut at 77.5 min, after a run lost to one corrupt
-  training geometry (below). Speed: V2_SPEED.
-- **21 correctness gates pass on an untrained model:**
-  - rotation, reflection, permutation and wrap to 1e-9 eV;
-  - finite-difference forces;
-  - a true variant-set oracle.
+\*Allegro trained 90 min on a laptop RTX 4080, and was timed uncompiled.
+†v1 versus MACE trained on PE only: 13.71 vs 13.73 meV/Å.
 
-  They run on *ether, amide, ester, C–Cl, CF₄, pyridine, thiophene, nitrile and ion*
-  fragments the model never trained on, so the symmetry guarantees hold for any
-  chemistry.
-- **Block registry.** For any new polymer it flags each building block as seen,
-  similar or novel relative to the training data, so users know when not to trust the
-  model.
+- **Speed and memory.** v2 is 2.5× faster than MACE at 1k atoms and 5.5× at 8k, and still
+  runs at 26k atoms, where MACE exhausts 46 GB. The PE-only v1, with no long-range terms,
+  needs 3.5 GB at 26k atoms.
+- **Accuracy.** With equal compute, v2's errors are about 2× MACE's. v2 plateaued after
+  ~120 of its 312 epochs, so this is a capacity gap, not under-training. On polyethylene
+  alone, v1 ties MACE.
+- **Correctness by construction.** 81 tests check exact invariance, finite-difference
+  forces and a true variant-set oracle. They pass even on chemistry the model never saw:
+  ethers, amides, esters, C–Cl, CF₄, aromatic N/S rings, nitriles and ions.
+- **Block registry.** For any new polymer, each building block is flagged as seen,
+  similar or novel relative to the training data.
 
-## What we learned (honest notes)
+## Lessons and next steps
 
-- **A frame can go singular.** One training frame had an H at exactly 180° to a C–C
-  bond. That made one frame singular and produced ~10⁴ eV/Å forces once per epoch. We
-  found and removed it. The principled fix, sin²-weighted frame averaging, is next.
-- **A benchmark artifact.** MACE's noisy NVE energy in float32 is a rounding artifact
-  of summing -1037 eV/atom offsets in float32. Our model stores the offsets as integers
-  and sums in float64.
-
-**Next:**
-- train on all of OPoly26 on a cluster;
-- stress output for NPT density and glass transition;
-- CUDA graphs to remove launch overhead.
+- **A singular frame.** One training geometry, an H at exactly 180° to a C–C bond, made a
+  frame singular and wrecked a run. We found it and removed it; sin²-weighted frame
+  averaging is the principled fix.
+- **Closing the accuracy gap.** Next: a second many-body layer, richer frame pooling, a
+  LAMMPS interface, and training on all of OPoly26.

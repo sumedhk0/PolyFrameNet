@@ -1,0 +1,39 @@
+{
+ "val": {
+  "e_mae_meV_atom": 3.5783193067213954,
+  "e_rmse_meV_atom": 6.932788316256076,
+  "f_mae_meV_A": 65.70447046152937,
+  "f_rmse_meV_A": 239.1512202447653,
+  "n_frames": 650
+ },
+ "test": {
+  "e_mae_meV_atom": 1.1849214646041675,
+  "e_rmse_meV_atom": 1.7654363791977872,
+  "f_mae_meV_A": 43.38691324149273,
+  "f_rmse_meV_A": 91.64041099291899,
+  "n_frames": 782
+ },
+ "pe_test": {
+  "e_mae_meV_atom": 0.42531662763104705,
+  "e_rmse_meV_atom": 0.5419631970609492,
+  "f_mae_meV_A": 18.530047076258562,
+  "f_rmse_meV_A": 26.379507437068355,
+  "n_frames": 77
+ },
+ "n_params": 673136,
+ "args": {
+  "raw": "/home/skothari67/pfn_data/opoly26_ch",
+  "config": "hydrocarbon",
+  "out": "/home/skothari67/pfn_data/runs/v2_l40s",
+  "minutes": "90.0",
+  "max_epochs": "10000",
+  "lr": "0.002",
+  "max_atoms": "2000",
+  "w_energy": "20.0",
+  "w_forces": "1.0",
+  "ema": "0.99",
+  "max_train_frames": "None",
+  "eval_every": "3",
+  "seed": "0"
+ }
+}

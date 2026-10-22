@@ -52,8 +52,8 @@ MAE, float64, identical splits for all models (`scripts/eval_ase.py`):
 
 | | Energy (meV/atom) | Force (meV/Å) |
 |---|---|---|
-| v2, hydrocarbon test (782 frames) | 2.02 | 50.4 |
-| v2, v1's polyethylene test (77 frames) | 0.65 | 24.1 |
+| v2, hydrocarbon test (782 frames) | 1.19 | 43.4 |
+| v2, v1's polyethylene test (77 frames) | 0.43 | 18.5 |
 | v1, polyethylene test (77 frames) | 0.33 | 13.7 |
 
 The baselines on the same splits are in `docs/writeup.md`.
@@ -62,8 +62,7 @@ The baselines on the same splits are in `docs/writeup.md`.
 
 - **Clusters only.** Training data is non-periodic. Bulk melts are an extrapolation, and
   there is no stress output, so no NPT.
-- **Short training.** v2 trained for 77.5 minutes on one laptop GPU. It is not
-  converged, and it is less accurate than MACE trained on the same data.
+- **Accuracy gap.** v2 trained 90 min (312 epochs) on one NVIDIA L40S. MACE trained the same way has about half of v2's errors (see `docs/writeup.md` section 8).
 - **Near-collinear frames.** A frame built from two bonds near 180° is singular. Frames
   are filtered in the data, but not yet guarded at inference (planned: sin²-weighted
   frame averaging).
