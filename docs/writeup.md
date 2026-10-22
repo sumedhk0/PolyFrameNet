@@ -19,7 +19,7 @@ with the same split, reference energies and loss weights, on one laptop GPU (RTX
 | Energy + forces per call, 976 atoms | **48 ms** | 112 ms |
 | Energy + forces per call, 7 808 atoms | **69 ms** | 5 946 ms |
 | Peak GPU memory, 7 808 atoms | **1.1 GB** | 12.4 GB |
-| NVE, 3 ps: drift (meV/atom/ps) | 0.0003 | see §4.5 |
+| NVE, 3 ps: drift (meV/atom/ps) | 0.0003 | -0.020 (float32, noise-dominated; §4.5) |
 
 * **Accuracy: a tie.** Forces are equal to within 0.2%. MACE's energy MAE is 14% lower.
 * **Speed and memory: PolyFrameNet wins.** It is 2.3× faster at 1k atoms. At 8k atoms
@@ -400,7 +400,7 @@ its starting value.
 |---|---|---|---|
 | PolyFrameNet, float32 | 0.0003 | 0.014 | 345 s |
 | MACE, float32 | -0.020 | 0.457 | 735 s |
-| MACE, float64 | pending | pending | pending |
+| MACE, float64 | not measured (run stopped: host out of memory) | | |
 
 ![nve](figures/nve.png)
 
@@ -414,7 +414,10 @@ its starting value.
 * *Our model:* PolyFrameNet had this exact bug and fixed it in review (offsets as int64
   micro-eV, sum in float64). On the same 30 geometries its float32 vs float64 difference is
   below 1e-4 meV/atom.
-* *Consequence:* the float64 MACE run is the like-for-like comparison.
+* *Consequence:* the float32 NVE comparison overstates PolyFrameNet's stability advantage.
+  The like-for-like run (`--dtype float64`, command under Reproduce) was started but stopped
+  when the machine ran low on memory, so no float64 MACE drift is reported. What can be
+  said: both models show drift far below 0.1 meV/atom/ps over 3 ps.
 
 **Limit of this test.** The spec asks for 100 ps. 3 ps catches gross non-conservation and
 noisy forces, but a rare frame discontinuity could take longer to show. That would be the
