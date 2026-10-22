@@ -184,3 +184,18 @@ def test_oracle_can_fail(systems):
     q[0] += [0.01, 0.0, 0.0]
     a, b = variant_signatures(z, p), variant_signatures(z, q)
     assert max(signature_mismatch(a[k], b[k]) for k in a) > 1e-3
+
+
+def test_calculator_matches_model(model, melt):
+    from ase import Atoms
+
+    from frame_potential.model import energy_and_forces
+    from frame_potential.v2.calculator import PolyFrameNetV2Calculator
+
+    z, p, cell = melt
+    at = Atoms(numbers=z, positions=p, cell=cell, pbc=True)
+    at.calc = PolyFrameNetV2Calculator(copy.deepcopy(model), "cpu", torch.float64)
+    t = topology_from_geometry_v2(z, p, cell)
+    E, F = energy_and_forces(model, collate_v2([t], [p], [cell]))
+    assert abs(at.get_potential_energy() - float(E[0])) < 1e-9
+    assert np.abs(at.get_forces() - F.detach().numpy()).max() < 1e-9

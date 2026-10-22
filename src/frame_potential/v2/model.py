@@ -32,6 +32,12 @@ _TRIU = (torch.tensor([0, 0, 0, 1, 1, 2]), torch.tensor([0, 1, 2, 1, 2, 2]))
 _F = nn.functional
 
 
+def _g(x, index):
+    """Row gather. index_select's backward is index_add (atomic); x[index]'s backward is a
+    sort-based index_put that dominated the step time on CPU (profiled: ~25%)."""
+    return x.index_select(0, index)
+
+
 def _scatter_mean(x, index, n):
     out = x.new_zeros((n,) + tuple(x.shape[1:])).index_add_(0, index, x)
     cnt = torch.bincount(index, minlength=n).clamp(min=1).to(x.dtype)
@@ -101,7 +107,7 @@ class PolyFrameNetV2(nn.Module):
         cab = batch.var_cab
         free = cab[:, 0] < 0
         c, a, b = (cab[:, k].clamp(min=0) for k in range(3))
-        va, vb = pos[a] - pos[c], pos[b] - pos[c]
+        va, vb = _g(pos, a) - _g(pos, c), _g(pos, b) - _g(pos, c)
         if batch.cell is not None:
             cv = batch.cell[batch.block_struct[batch.var_block]]
             va, vb = _mic_shift(va, cv), _mic_shift(vb, cv)
@@ -111,7 +117,7 @@ class PolyFrameNetV2(nn.Module):
         F = torch.stack([e1, e2, e3], -1)  # columns are basis vectors
         return torch.where(free[:, None, None], torch.zeros_like(F), F)
 
-    def forward(self, batch, edges=None, lr_edges=None):
+    def forward(self, batch, edges=None, lr_edges=None, capture=None):
         """Energy per structure (S,), float64. Pure function of positions and cell."""
         pos = batch.positions
         dt = pos.dtype
@@ -121,7 +127,8 @@ class PolyFrameNetV2(nn.Module):
             self.z_emb(batch.numbers),
             _F.one_hot(batch.degree.clamp(max=6), 7).to(dt),
             batch.ring.to(dt)[:, None],
-            _F.one_hot(batch.n_ext.clamp(max=4), 5).to(dt)], -1)) + self.qs_lin(qs)[batch.struct]
+            _F.one_hot(batch.n_ext.clamp(max=4), 5).to(dt)], -1))
+        u = u + _g(self.qs_lin(qs), batch.struct)
 
         # Stage 1: contiguous block coordinates, origins, frames ------------------------
         ba = batch.block_atoms
@@ -133,23 +140,32 @@ class PolyFrameNetV2(nn.Module):
         o = (X * mf).sum(1) / mf.sum(1)
         F = self._frames(batch, pos)
 
+        # Ragged bookkeeping (integers only): every listed atom with its block and slot,
+        # so no feature tensor is padded to the largest block in the batch.
+        with torch.no_grad():
+            kb, ks = torch.nonzero(mask, as_tuple=True)
+        relA = pos.new_zeros(N, 3).index_put((ba[kb, ks],), X[kb, ks] - _g(o, kb))  # r - o_block
+
         # Stage 2: shared block encoder -------------------------------------------------
         n = ba.shape[1]
-        uB = u[ba.clamp(min=0)] * mf
-        dv = X[:, :, None] - X[:, None]
+        with torch.no_grad():
+            eye = torch.eye(n, dtype=torch.bool, device=pos.device)
+            pb, pk, pl = torch.nonzero(mask[:, :, None] & mask[:, None, :] & ~eye,
+                                       as_tuple=True)
+        ak, al = ba[pb, pk], ba[pb, pl]
+        dv = _g(relA, ak) - _g(relA, al)  # same block origin
         r = torch.sqrt((dv * dv).sum(-1) + 1e-12)
-        eye = torch.eye(n, dtype=torch.bool, device=pos.device)
-        pm = (mask[:, :, None] & mask[:, None, :] & ~eye).to(dt)[..., None]
-        pin = torch.cat([gaussians(r, 0.8, 7.0, self.n_pair_rbf),
-                         uB[:, :, None].expand(-1, -1, n, -1),
-                         uB[:, None].expand(-1, n, -1, -1)], -1)
-        P = (self.pair_net(pin) * pm).sum(2)  # invariant pair context per atom
-        vbk = batch.var_block
-        coords = torch.einsum("rni,rij->rnj", X[vbk] - o[vbk][:, None], F)  # F^T (r - o)
-        x = self.atom_net(torch.cat([coords, uB[vbk], P[vbk]], -1)) * mf[vbk]
-        H = _scatter_mean(self.block_net(x.sum(1)), vbk, B)
-        hb = _scatter_mean(x, vbk, B)
-        h_atom = pos.new_zeros(N, hb.shape[-1]).index_put((ba[mask],), hb[mask])
+        pin = torch.cat([gaussians(r, 0.8, 7.0, self.n_pair_rbf), _g(u, ak), _g(u, al)], -1)
+        P = pos.new_zeros(N, self.pair_net[-1].out_features).index_add(0, ak, self.pair_net(pin))
+        aa, av = batch.av_atom, batch.av_var  # (atom, variant of its block) rows
+        Fa = _g(F, av)
+        coords = torch.einsum("ai,aij->aj", _g(relA, aa), Fa)  # F^T (r - o)
+        x = self.atom_net(torch.cat([coords, _g(u, aa), _g(P, aa)], -1))
+        Hv = self.block_net(x.new_zeros(len(batch.var_block), x.shape[-1]).index_add(0, av, x))
+        H = _scatter_mean(Hv, batch.var_block, B)
+        h_atom = _scatter_mean(x, aa, N)
+        if capture is not None:
+            capture["H2"] = H.detach()
 
         # Stage 3: bonded channel on the block graph ------------------------------------
         # The update layers run for every block, edges or not: a block with no
@@ -158,63 +174,67 @@ class PolyFrameNetV2(nn.Module):
         src, dst = batch.edge_src, batch.edge_dst
         has_edges = bool(src.numel())
         if has_edges:
-            dO = o[src] - o[dst]
+            dO = _g(o, src) - _g(o, dst)
             if batch.cell is not None:
                 dO = _mic_shift(dO, batch.cell[batch.block_struct[dst]])
-            relJ = X[src] - o[src][:, None] + dO[:, None]  # J's atoms relative to o_I
             ee, ev = batch.ev_edge, batch.ev_var
-            cJ = torch.einsum("qni,qij->qnj", relJ[ee], F[ev])
-            g = (self.geo_net(torch.cat([cJ, uB[src][ee]], -1)) * mf[src][ee]).sum(1)
-            relI = X[dst] - o[dst][:, None]
-            pv = relJ[:, None, :, :] - relI[:, :, None, :]
+            with torch.no_grad():  # (edge-variant row, atom of J) pairs
+                qi, qslot = torch.nonzero(mask[src[ee]], as_tuple=True)
+            aJ = ba[src[ee[qi]], qslot]
+            cJ = torch.einsum("qi,qij->qj", _g(relA, aJ) + _g(dO, ee[qi]), _g(F, ev[qi]))
+            g = cJ.new_zeros(len(ee), self.geo_net[-1].out_features).index_add(
+                0, qi, self.geo_net(torch.cat([cJ, _g(u, aJ)], -1)))
+            with torch.no_grad():  # all atom pairs across the two blocks of each edge
+                pe_, pa, pc = torch.nonzero(mask[dst][:, :, None] & mask[src][:, None, :],
+                                            as_tuple=True)
+            aI, aJ2 = ba[dst[pe_], pa], ba[src[pe_], pc]
+            pv = _g(relA, aJ2) + _g(dO, pe_) - _g(relA, aI)
             rx = torch.sqrt((pv * pv).sum(-1) + 1e-12)
-            zI = batch.numbers[ba[dst].clamp(min=0)]
-            zJ = batch.numbers[ba[src].clamp(min=0)]
-            pe = self.pz(zI)[:, :, None] * self.pz(zJ)[:, None, :]  # symmetric pair embedding
-            pmx = (mask[dst][:, :, None] & mask[src][:, None, :]).to(dt)[..., None]
-            pooled = torch.einsum("eabc,eabk->eck", pe * pmx,
-                                  gaussians(rx, 1.0, 8.0, self.n_x_rbf)).flatten(1) / 4.0
+            pz = self.pz(batch.numbers[aI]) * self.pz(batch.numbers[aJ2])  # symmetric
+            G = gaussians(rx, 1.0, 8.0, self.n_x_rbf)
+            pooled = pz.new_zeros(len(src), pz.shape[1], self.n_x_rbf).index_add(
+                0, pe_, pz[:, :, None] * G[:, None, :]).flatten(1) / 4.0
             efeat = torch.cat([pooled, _F.one_hot(batch.edge_hop, 2).to(dt)], -1)
+            dst_e, src_e = dst[ee], src[ee]
         for msg, upd in zip(self.msg, self.upd, strict=True):
             agg = torch.zeros_like(H)
             if has_edges:
-                z = torch.cat([H[dst][ee], H[src][ee], g, efeat[ee]], -1)
+                z = torch.cat([_g(H, dst_e), _g(H, src_e), g, _g(efeat, ee)], -1)
                 m = _scatter_mean(msg(z), ee, len(src))  # mean over I's variants
                 agg = agg.index_add(0, dst, m)
             H = H + upd(torch.cat([H, agg], -1))
 
         # Valence prior -----------------------------------------------------------------
         vi, vj = batch.val_pairs[:, 0], batch.val_pairs[:, 1]
-        vv = pos[vj] - pos[vi]
+        vv = _g(pos, vj) - _g(pos, vi)
         if batch.cell is not None:
             vv = _mic_shift(vv, batch.cell[batch.struct[vi]])
         rv = torch.sqrt((vv * vv).sum(-1) + 1e-12)
-        ui, uj = self.val_u(u[vi]), self.val_u(u[vj])
+        ui, uj = self.val_u(_g(u, vi)), self.val_u(_g(u, vj))
         ev_ = self.val_net(torch.cat([gaussians(rv, 0.8, 4.4, 48),
                                       _F.one_hot(batch.val_d - 1, 3).to(dt),
                                       ui + uj, ui * uj], -1)).squeeze(-1)
         val_atom = pos.new_zeros(N).index_add(0, vi, 0.5 * ev_).index_add(0, vj, 0.5 * ev_)
 
         # Stage 4: non-bonded channel ---------------------------------------------------
-        x_atom = torch.cat([h_atom, H[batch.block_of_atom]], -1)
+        x_atom = torch.cat([h_atom, _g(H, batch.block_of_atom)], -1)
         i4, j4, S4 = radius_graph(batch, self.cutoff) if edges is None else edges
         vec = edge_vectors(batch, i4, j4, S4)
         r4 = torch.sqrt((vec * vec).sum(-1))
         rhat = vec / r4[:, None]
         rb = bessel_envelope(r4, self.cutoff, self.n_rbf)
         pe4 = self.nb_pair(batch.numbers[i4]) * self.nb_pair(batch.numbers[j4])
-        phi = self.radial((rb[:, :, None] * pe4[:, None, :]).flatten(1)) * self.gate(x_atom)[j4]
+        phi = self.radial((rb[:, :, None] * pe4[:, None, :]).flatten(1))
+        phi = phi * _g(self.gate(x_atom), j4)
         s = 1.0 / self.avg_nbr
         M0 = x_atom.new_zeros(N, self.n_ch).index_add(0, i4, phi) * s
         M1 = x_atom.new_zeros(N, self.n_ch, 3).index_add(
             0, i4, phi[:, :, None] * rhat[:, None, :]) * s
         M2 = x_atom.new_zeros(N, self.n_ch, 3, 3).index_add(
             0, i4, phi[:, :, None, None] * (rhat[:, :, None] * rhat[:, None, :])[:, None]) * s
-        aa, av = batch.av_atom, batch.av_var
-        Fa = F[av]
-        P1 = torch.einsum("aci,aij->acj", M1[aa], Fa)
-        P2 = torch.einsum("aik,acij,ajl->ackl", Fa, M2[aa], Fa)[:, :, _TRIU[0], _TRIU[1]]
-        A = torch.cat([M0[aa][:, :, None], P1, P2], -1).flatten(1)
+        P1 = torch.einsum("aci,aij->acj", _g(M1, aa), Fa)
+        P2 = torch.einsum("aik,acij,ajl->ackl", Fa, _g(M2, aa), Fa)[:, :, _TRIU[0], _TRIU[1]]
+        A = torch.cat([_g(M0, aa)[:, :, None], P1, P2], -1).flatten(1)
         Bv = torch.cat([self.lin1(A), self.lin2a(A) * self.lin2b(A),
                         self.lin3a(A) * self.lin3b(A) * self.lin3c(A)], -1)
         Bn = _scatter_mean(Bv, aa, N)  # products before the mean keep orientation info
