@@ -199,3 +199,19 @@ def test_calculator_matches_model(model, melt):
     E, F = energy_and_forces(model, collate_v2([t], [p], [cell]))
     assert abs(at.get_potential_energy() - float(E[0])) < 1e-9
     assert np.abs(at.get_forces() - F.detach().numpy()).max() < 1e-9
+
+
+def test_float32_force_training_step_is_finite(rng):
+    """Force training differentiates the forces (double backward) in float32. Frame-free
+    rows have zero frame vectors; their second derivative through the normaliser must not
+    overflow to inf (inf * 0 = NaN poisons every weight)."""
+    from frame_potential.model import energy_and_forces
+
+    z, p = cluster_of([g2("CO2"), g2("CH3CN"), ion_pair(), g2("C6H6"), g2("isobutane")], rng)
+    t = topology_from_geometry_v2(z, p)
+    torch.manual_seed(0)
+    m = PolyFrameNetV2().float()
+    b = collate_v2([t], [p], forces=[np.zeros_like(p)], energies=[0.0]).to("cpu", torch.float32)
+    E, F = energy_and_forces(m, b, create_graph=True)
+    (F**2).mean().backward()
+    assert all(bool(torch.isfinite(q.grad).all()) for q in m.parameters() if q.grad is not None)

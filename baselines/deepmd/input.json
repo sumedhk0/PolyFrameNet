@@ -1,0 +1,30 @@
+{
+  "_comment": "DeepMD se_e2_a baseline on the v2 hydrocarbon split. systems lists and numb_steps are filled in at launch by baselines/deepmd/README.md; loss uses DeepMD's own prefactor schedule (a disclosed deviation from E 20 / F 1).",
+  "model": {
+    "type_map": ["H", "C"],
+    "descriptor": {
+      "type": "se_e2_a",
+      "rcut": 6.0,
+      "rcut_smth": 0.5,
+      "sel": [60, 30],
+      "neuron": [25, 50, 100],
+      "axis_neuron": 16
+    },
+    "fitting_net": {"neuron": [240, 240, 240]}
+  },
+  "learning_rate": {"type": "exp", "start_lr": 1e-3, "stop_lr": 3e-8, "decay_steps": 5000},
+  "loss": {
+    "type": "ener",
+    "start_pref_e": 0.02,
+    "limit_pref_e": 1,
+    "start_pref_f": 1000,
+    "limit_pref_f": 1
+  },
+  "training": {
+    "training_data": {"systems": "TRAIN_SYSTEMS", "batch_size": "auto"},
+    "validation_data": {"systems": "VAL_SYSTEMS", "batch_size": 1, "numb_btch": 20},
+    "numb_steps": 400000,
+    "disp_freq": 1000,
+    "save_freq": 10000
+  }
+}

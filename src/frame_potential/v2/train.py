@@ -80,7 +80,7 @@ def main(argv=None):
     p.add_argument("--out", type=pathlib.Path, required=True)
     p.add_argument("--minutes", type=float, default=90.0)
     p.add_argument("--max-epochs", type=int, default=10000)
-    p.add_argument("--lr", type=float, default=5e-3)
+    p.add_argument("--lr", type=float, default=2e-3)
     p.add_argument("--max-atoms", type=int, default=2000)
     p.add_argument("--w-energy", type=float, default=20.0)
     p.add_argument("--w-forces", type=float, default=1.0)
@@ -129,7 +129,7 @@ def main(argv=None):
         for g in opt.param_groups:  # cosine decay on wall-clock fraction
             g["lr"] = a.lr * (0.02 + 0.98 * 0.5 * (1 + math.cos(math.pi * frac)))
         batches = make_batches(train, a.max_atoms, rng)
-        tl, nb = 0.0, 0
+        tl, nb, n_skip = 0.0, 0, 0
         for ids in batches:
             b = collate_frames_v2(train, ids).to(device, torch.float32)
             E, F = energy_and_forces(model, b, create_graph=True)
@@ -138,10 +138,15 @@ def main(argv=None):
                     + a.w_forces * ((F - b.forces) ** 2).mean())
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+            gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+            if not (torch.isfinite(loss) and torch.isfinite(gnorm)):
+                # One non-finite step would poison every weight (and the EMA). Skip it and
+                # count it: a run with many skips is diverging, not converging.
+                n_skip += 1
+                continue
             opt.step()
             _ema_update(ema, model, a.ema)
-            tl += float(loss)
+            tl += float(loss.detach())
             nb += 1
             step += 1
             if time.time() - t0 > budget:
@@ -149,7 +154,8 @@ def main(argv=None):
         elapsed = time.time() - t0
         if epoch % a.eval_every == 0 or elapsed > budget:
             mtr = evaluate_v2(ema, val, device)
-            mtr.update(epoch=epoch, step=step, minutes=elapsed / 60, train_loss=tl / nb)
+            mtr.update(epoch=epoch, step=step, minutes=elapsed / 60, train_loss=tl / max(nb, 1),
+                       skipped=n_skip)
             history.append(mtr)
             score = mtr["e_rmse_meV_atom"] + mtr["f_rmse_meV_A"] / 20
             tag = ""
@@ -157,7 +163,7 @@ def main(argv=None):
                 best = score
                 torch.save({"state": ema.state_dict(), "config": ema.config}, a.out / "best.pt")
                 tag = " *"
-            print(f"ep {epoch:4d} {elapsed / 60:6.1f} min loss {tl / nb:.3e} "
+            print(f"ep {epoch:4d} {elapsed / 60:6.1f} min loss {tl / max(nb, 1):.3e} skip {n_skip} "
                   f"val E {mtr['e_mae_meV_atom']:.2f} meV/at F {mtr['f_mae_meV_A']:.1f} meV/A{tag}",
                   flush=True)
             (a.out / "history.json").write_text(json.dumps(history, indent=1))
