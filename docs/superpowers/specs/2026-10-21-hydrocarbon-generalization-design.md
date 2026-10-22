@@ -1,218 +1,395 @@
-# v2: generalise PolyFrameNet from polyethylene to all hydrocarbon polymers
+# v2: one general polymer architecture, trained on hydrocarbons for the hackathon
 
-Status: design approved in chat (option 1, carbon-centred blocks), 2026-10-21. Deadline:
-trained, benchmarked and written up by the afternoon of 2026-10-22, with a full
-explanation by 6 pm.
+Status: revised 2026-10-21 after design discussion. This revision replaces the
+carbon-centred draft (commit 665099c). Deadline: trained, benchmarked and written up by
+the afternoon of 2026-10-22, with a full explanation by 6 pm.
 
 ## Intent
 
-v1 handles only linear, saturated, even-length PE chains, and so used 631 of the 70k
-C/H frames already downloaded. v2 is a single potential for any non-reactive hydrocarbon
-polymer. That covers PE, PP, PS, PIB, polybutadiene, aromatics and branched chains, in
-any fragment OPoly26 carved. It keeps v1's invariants: forces by autodiff, no caching,
-topological frame selection, raw rotation matrices, symmetrise never select, smooth cutoff.
+**The principle.** The hackathon model and the general polymer model are the same
+architecture and the same code. The only difference is the data each is trained on.
 
-Success means all of the following:
-1. All v1 correctness gates pass on v2, on molecules that exercise every carbon type,
-   including aromatic rings, quaternary carbons and methane.
-2. v2 and MACE are trained on the same small subsample of hydrocarbon frames with the
-   same split, and their test accuracy is reported.
-3. v2 is also evaluated on v1's PE test frames. This answers whether generality cost
-   accuracy on PE.
-4. Speed, memory and NVE are measured as for v1, on a PE melt and on one aromatic
-   (polystyrene) system.
+- **Hackathon:** trained on a small subsample of OPoly26 hydrocarbon frames, on the laptop
+  GPU.
+- **Later:** the same code is trained on all of OPoly26 on a cluster, and nothing changes
+  but the data config.
 
-Out of scope: heteroatoms, charged systems, long-range electrostatics, reactive frames,
-sp carbons (alkynes, allenes), stress/NPT.
+**Consequences.** Everything a general polymer needs is built and gated now, even where
+hydrocarbon data will barely exercise it:
+- any element;
+- heteroatom block rules;
+- charge and spin inputs;
+- long-range electrostatics;
+- a dispersion tail.
 
-## Data facts (scripts/survey_ch.py, all 70 735 C/H frames)
+**v1 is kept.** v1 (the PE-only model) stays in the repo, untouched, as the baseline.
 
-- 70 325 frames have a clean bond graph. In such a graph every H has one C neighbour and
-  every C has 2-4 neighbours.
-- Every frame has multiplicity 1. The charge is not stored.
-- Carbon environments, written (C neighbours, H neighbours):
+**Invariants carried over from v1:**
+- forces come from autodiff;
+- nothing is cached across steps;
+- frame atoms are chosen by topology only;
+- rotations are passed as raw 3-vectors and 3x3 matrices, never compressed;
+- arbitrary choices are symmetrised, never selected;
+- every radial function goes smoothly to zero at its cutoff.
 
-  | Environment | Count | Meaning |
-  |---|---|---|
-  | (2,1) | 1.97 M | aromatic CH or =CH- |
-  | (2,2) | 1.36 M | CH2 |
-  | (3,0) | 0.97 M | aromatic or substituted sp2 C |
-  | (1,3) | 0.87 M | CH3 |
-  | (3,1) | 0.30 M | CH |
-  | (4,0) | 79 k | quaternary C |
-  | (1,2) | 43 k | =CH2 |
-  | (2,0), (1,1) | 10 k | sp carbon |
-  | (0,4), (0,3), (0,2) | 6 k | methane and small fragments |
+**Success criteria:**
+1. **Gates pass on every chemistry, untrained.** The untrained model passes every
+   correctness gate on hydrocarbons *and* on heteroatom polymers it was never trained on:
+   PEO, nylon-6, PMMA, PVC, PTFE and PET fragments, plus a charged fragment and an ion
+   pair. This is the evidence that the architecture is general.
+2. **Hydrocarbon accuracy.** v2 and MACE are trained on the same hydrocarbon subsample
+   with the same split, and their test accuracy is reported.
+3. **PE comparison.** v2 is evaluated on v1's PE test frames: did generality cost accuracy
+   on PE?
+4. **MD benchmarks.** Speed, memory and NVE are measured on a PE melt and on a
+   polystyrene system.
 
-- Frames have a median of 179 atoms and a maximum of 357.
-- Source paths group into MD systems with about 3 frames each.
+**Out of scope:**
+- reactive chemistry;
+- full OPoly26 training;
+- periodic DFT data;
+- excited states.
 
-## Block definition
+## Data facts (scripts/survey_ch.py, the 70 735 C/H frames on disk)
 
-- **A block is one carbon plus the hydrogens bonded to it.** Block type is the carbon's
-  environment (nC, nH).
-- **Allowed types:**
-  - sp3 (4 neighbours): (4,0), (3,1), (2,2), (1,3), (0,4);
-  - sp2 (3 neighbours): (3,0), (2,1), (1,2).
-- **Rejected at topology time:**
-  - any carbon with 2 neighbours (sp; the frame would be collinear);
-  - (0,3) and (0,2) (charged or radical fragments);
-  - an H that is not bonded to exactly one C;
-  - an H-H bond.
-- **The block graph is the C-C bond graph.** It is a general graph, so branches and rings
-  are fine. Block edges are 1-hop (bonded carbons) and 2-hop (carbons sharing a
-  neighbour).
-- **Valence pairs.** They are found by BFS over the full atom graph, as in v1, at
-  topological distances 1, 2 and 3.
-- **OPoly26 path filter.** Frames under `reactivity/` are dropped (AFIR reaction paths).
+- **Clean frames.** 70 325 have a clean bond graph: every H has one C neighbour, and every
+  C has 2-4 neighbours.
+- **Multiplicity.** Every frame is 1.
+- **Charge is not stored.** Hydrocarbon frames are taken as neutral. The general fetch
+  must store charge, and ColabFit should carry it; the gap is recorded for the cluster
+  run.
+- **Carbon environments.** Aromatic CH and aromatic C dominate:
 
-## Stage 1: frames per block, enumerated over topological choices
+  | Environment | Count |
+  |---|---|
+  | (2,1) | 1.97 M |
+  | (3,0) | 0.97 M |
+  | (2,2) | 1.36 M |
+  | (1,3) | 0.87 M |
+  | (3,1) | 0.30 M |
+  | (4,0) | 79 k |
+  | (1,2) | 43 k |
+  | sp carbons (2,0) and (1,1) | 10 k |
+  | (0,x) fragments | 6 k |
 
-For carbon c with bonded neighbours N(c):
-- **e1 candidates.** The neighbours that are carbon, or all neighbours when c has none
-  (methane).
-- **Variant.** One variant is an ordered pair (a, b), with a an e1 candidate and b in
-  N(c), b != a, combined with a mirror flag m in {+1, -1}.
+- **Size.** Median 179 atoms per frame, maximum 357.
+
+## Stage 0a: bonds (element-general)
+
+- **Bond test.** Two atoms are bonded if their distance is below s · (r_cov,i + r_cov,j),
+  using covalent radii (Cordero 2008) and s = 1.2.
+  - This replaces v1's C-C / C-H thresholds.
+  - It must reproduce v1's bonds on every v1 PE frame (gate).
+- **Search.** KD-tree, periodic as in v1.
+- **Hard rejections:**
+  - an H bonded to more than one atom;
+  - an atom with more neighbours than its element allows, max_valence[Z] (C 4, N 4,
+    O 3, H 1, halogens 1, Si 4, S 6, P 5).
+- **Frames under `reactivity/` are dropped.**
+
+## Stage 0b: the block rule (graph only, no bond orders)
+
+Bond orders are never perceived. Inferring them from geometry is fragile on carved,
+charged or strained fragments, and a wrong guess changes the blocks.
+
+**Rules, applied in order:**
+1. **Ring systems.** Every ring system is one block. Rings are bonds that lie on a cycle
+   (bridges are the non-ring bonds). Fused rings merge.
+2. **Non-ring atoms.** Every remaining non-terminal atom starts as its own block.
+3. **Terminal atoms.** Atoms with degree 1 join their neighbour's block. This covers
+   H, F, Cl, Br, carbonyl O, nitrile N and so on. Two terminal atoms bonded only to each
+   other (H2, HCl) form one block. An atom with degree 0 (a monatomic ion) is its own
+   block.
+4. **Linear atoms.**
+   - A linear atom is a non-ring C with degree 2 (sp: nitrile C, alkyne, allene centre).
+     A degree-2 N is treated as bent: imines are bent, and azides are rare and out of
+     scope.
+   - The linear atom and all of its neighbours' blocks merge into one block (union).
+     That is symmetric, so no choice is made.
+   - An alkyne chain C≡C therefore merges with the blocks at both ends.
+5. **Size cap.** If a block has more than 32 atoms, it is split at ring-ring single
+   bonds: bridges inside a fused-through-bridges system. If it still has more than 32,
+   the frame is rejected.
+
+**Examples:**
+
+| Polymer | Blocks |
+|---|---|
+| PE | CH2 |
+| PS | CH2, CH, C6H5 |
+| PMMA | CH2, C(quaternary), C(=O), O, CH3 |
+| PEO | CH2, O |
+| Nylon | C(=O), NH, CH2 |
+| PET | C6H4, C(=O), O, CH2 |
+| PVC | CH2, CHCl |
+| PTFE | CF2 |
+| Polythiophene | each ring |
+
+**Known cost.** Acyclic double bonds and amide C-N bonds are cut. Their stiff torsions
+are learned by Stage 3 rather than inside a block.
+
+**Future option (off in v2).** When reliable bond orders exist (production MD topology
+files), conjugated acyclic units could be merged.
+
+**Canonical colours.**
+- **Refinement.** Every atom gets a Weisfeiler-Lehman colour, refined over (Z, degree,
+  ring flag, neighbour colours) until the partition is stable (at most 20 rounds).
+  Stability guarantees that atoms in the same class have the same multiset of neighbour
+  colours. The variant rule relies on that.
+- **Hashing.** Colours are hashed with hashlib, so they are stable across processes. Do
+  not use Python's `hash`.
+- **Determinism.** Colours are permutation-invariant by construction. Every "choose
+  canonically" in this spec means: choose the colour class that is smallest (fewest
+  atoms), ties broken by colour value. That class is a set of atoms, so no individual
+  atom is ever selected.
+
+## Stage 1: frames by colour-class variants
+
+- **Anchor atoms of block I.**
+  - The canonical colour class among the block's atoms with at least 2 neighbours.
+  - Linear atoms and degree-1 atoms are excluded as anchors.
+- **Variant.**
+  - (c, a, b, m), where c is an anchor and a is in the canonical colour class of N(c).
+  - b is in the canonical colour class of N(c) \ {a}, and m ∈ {+1, -1}.
+  - Here N(c) is all bonded neighbours, inside or outside the block.
 - **Frame:**
   - e1 = unit(r_a - r_c);
-  - e2 = unit(r_b - r_c minus its e1 component);
-  - e3 = m (e1 x e2);
-  - origin = r_c.
-- **Why it never degenerates.** Any two bonds of an sp2 or sp3 carbon are 105-125 degrees
-  apart, so sin(angle) is at least about 0.8. The gate measures the minimum on real data.
-- **Variant counts.**
-  - Per block: |e1 candidates| x (deg - 1) x 2.
-  - By type: CH3 = 6, CH2 = 12, aromatic CH = 8, aromatic C = 12, quaternary C = 24,
-    methane = 24.
-  - Hydrogens share their carbon's variants.
-- **Invariance.**
-  - The variant set is mapped onto itself by every rotation, reflection and relabelling
-    of equivalent atoms.
-  - So any quantity averaged over a block's full variant set is O(3)- and
-    permutation-invariant.
-  - Variants are chosen by topology only, so the average is smooth in the positions.
-  - This is v1's fwd/rev/mirror average, generalised.
+  - e2 = unit(r_b - r_c with its e1 component removed);
+  - e3 = m (e1 × e2);
+  - origin = the centroid of the block's atoms.
+- **Exactness.** Any symmetry of the system maps colour classes to colour classes, so the
+  variant set is closed under the symmetry. Mean over variants is therefore exactly
+  O(3)- and permutation-invariant.
+  - WL colours may merge some non-equivalent atoms. That only adds variants, which is
+    still exact.
+  - No automorphism enumeration is needed.
+- **Conditioning.**
+  - a and b are bonded neighbours of a non-linear atom, so the angle a-c-b is
+    90-125 degrees in practice.
+  - The gate reports the minimum of sin(a-c-b) on all data.
+- **Variant counts (expected):**
+
+  | Block | Variants |
+  |---|---|
+  | CH2 in PE | 4 (as in v1) |
+  | CH3 | 6 |
+  | Phenyl (ipso anchor) | 4 |
+  | Benzene | about 24 |
+  | Quaternary C | up to 24 |
+
+- **Frame-free blocks.**
+  - Which: a block with no anchor (monatomic ion, linear molecule such as CO2 or N2, H2).
+  - What it gets: frame-free invariants only, namely distances and type. It contributes
+    no projected features: P1 and P2 are zero for its atoms, and Stage 2 uses distances
+    only.
 - **Storage.**
-  - Variants are stored flat: `var_block`, `var_a`, `var_b` and `var_m`, one row per
-    variant.
-  - Means are taken with a scatter-mean over `var_block`.
+  - Variants are stored flat: `var_block`, `var_c`, `var_a`, `var_b`, `var_m`.
+  - Means are scatter-means over `var_block`.
   - No padding.
 
-## Stage 2: block encoder (deep sets, no hand-written groups)
+## Stage 2: shared block encoder
 
-For each variant v of block I:
-- **Input:**
-  - the type embedding of I;
-  - Σ over hydrogens h of φ(F_v^T (r_h - r_c));
-  - Σ over carbon neighbours j of φ_C(F_v^T (r_j - r_c), type_j).
-- **Why no group tables are needed.** The sums make the input invariant to hydrogen and
-  neighbour labelling. v1's 16- and 24-element tables go away.
-- **Block feature.** H_I = mean over v of MLP(input_v).
-- **Per-atom features.** For hydrogens, h_i = mean over v of MLP_H(F_v^T(r_h - r_c),
-  H-pre). Carbons use H_I.
+- **One encoder for every block type**, so new monomers need no new weights.
+- **Padding.** Each block is padded to the size cap.
+- **Encoder steps, for each variant v of block I:**
+  1. **Atom input.**
+     - The frame coordinates F_v^T(r_k - o) of atom k.
+     - A species embedding of atom k (element embedding table for Z ≤ 86).
+     - Its degree and ring flag.
+     - An external-bond count.
+  2. **Pair features.** For each pair (k, l) inside the block, MLP(gaussians(|r_k - r_l|),
+     emb_k, emb_l).
+  3. **Atom state.** x_k = MLP(atom input_k + Σ_l pair_kl).
+  4. **Block feature.** H_I,v = MLP(Σ_k x_k).
+- **Averaging.** Per-atom features h_k and the block feature H_I are means over v.
+- **Invariance to atom labelling inside the block.** It comes from the sums. The
+  invariance to frame choice comes from the variant mean. No hand-written groups are
+  needed.
+- **Cost.** Pair features cost O(n_block²) per block. With a cap of 32 that is small, and
+  for v1-like CH2 blocks n = 3.
 
 ## Stage 3: bonded channel, 3 layers on the block graph
 
-For an edge J -> I (1-hop or 2-hop):
-- **Message per variant v of I:**
-  - MLP(H_I, H_J, Σ over atoms a in J of ψ(F_v^T(r_a - r_c,I), species_a), pooled pair
-    Gaussians, hop one-hot).
-  - The sum over J's atoms encodes J's orientation in I's frame. It replaces R_IJ, which
-    would need J's frame too: averaging over the product of both variant sets costs up
-    to 24 x 24.
-  - Raw 3-vectors enter; nothing is compressed.
+- **Block graph.**
+  - Blocks are joined by a 1-hop edge when a covalent bond crosses them.
+  - A 2-hop edge joins blocks that share a neighbour block.
+- **Message J → I, for each variant v of I:**
+  - Inputs: H_I and H_J.
+  - Σ over atoms a in J of ψ(F_v^T(r_a - o_I), emb_a).
+  - Class-pooled cross-block pair Gaussians, pooled by species pair. Species pairs are
+    folded into a learned pair embedding, not a fixed 3-class list.
+  - A one-hot of the hop type.
 - **Edge message.** m_IJ = mean over v.
-- **Update.** H_I += MLP(H_I, Σ_J m_IJ). The sum is over the edges into I.
+- **Update.** H_I += MLP(H_I, Σ_J m_IJ).
+- **Why no R_IJ.** J's frame is not needed, because J's atom positions in I's frame
+  encode the relative orientation. Raw 3-vectors enter.
 
 ## Valence prior
 
-As in v1: an MLP over 48 Gaussians of r_ij for every 1-2, 1-3 and 1-4 pair. The input
-also gets a symmetric encoding of the two endpoint block types, (t_i + t_j, t_i * t_j).
-That lets C-C single (1.54 Å), aromatic (1.39 Å) and double (1.34 Å) bonds have
-different minima. In v1 the class was only the species pair.
+- **Pairs.** Every topological 1-2, 1-3 and 1-4 pair, found by BFS over the atom graph.
+- **Input.** 48 Gaussians of r_ij from 0.8 to 4.4 Å, the one-hot of the distance, and a
+  symmetric pair encoding (u_i + u_j, u_i * u_j).
+  - u_i is the embedding of atom i's (Z, degree, ring flag).
+  - That lets C-C single, aromatic and double bonds, and C-O versus C=O, have different
+    minima without bond orders.
+- **Energy split.** Half of each pair energy goes to each atom.
 
 ## Stage 4: non-bonded, one pass
 
-- **Moments.** Global Cartesian moments M0, M1, M2 per atom, as in v1, cutoff 4.5 Å, all
-  pairs kept (v1's ablation).
-- **Projection per variant.** F_v^T M1 and F_v^T M2 F_v.
-- **Body order per variant.** The 2-, 3- and 4-body products B_v.
-- **Average.** B = mean over v. The products are nonlinear, so averaging after them keeps
-  orientation information. Averaging the raw projections first would not.
+- **As in v1:**
+  - global Cartesian moments M0, M1 and M2, with a cutoff of 4.5 Å;
+  - every pair is kept;
+  - a Bessel radial basis with a smooth envelope.
+- **Radial weights.** They use a learned species-pair embedding, not a fixed species-pair
+  table.
+- **Per variant.**
+  - Project F_v^T M1 and F_v^T M2 F_v.
+  - Form the 2-, 3- and 4-body products B_v.
+  - Take the mean of B_v over v.
+  - Products are taken before the mean, so orientation information survives.
+
+## Stage 5: long range (new, built and gated now)
+
+**5a. Latent-charge electrostatics** (in the style of latent Ewald summation,
+Cheng 2024).
+- **Charges.**
+  - q_i = MLP(final atom features).
+  - q_i is then shifted so that Σ q_i equals the frame's total charge Q, an input.
+  - The shift is uniform per structure.
+- **Energy.**
+  - Clusters: E_es = k Σ_{i<j} q_i q_j erf(r_ij / σ) / r_ij over all pairs. Erf screening
+    removes the 1/r singularity, so the energy is smooth.
+  - Periodic: Ewald summation with the same Gaussian smearing. That is a real-space
+    erfc sum within r_c plus a reciprocal sum over k vectors, with the self term
+    removed. The Ewald α is chosen from box size.
+- **No supervision.** Charges are not fitted to any reference charge. They are latent
+  and learned from energies and forces only.
+
+**5b. Dispersion tail.**
+- **Energy.** E_disp = -Σ_{i<j} C6_ij / (r_ij^6 + R0_ij^6) · S(r_ij).
+- **C6.** C6_ij = sqrt(C6_i C6_j). C6_i = softplus(MLP(atom features)), so it depends on
+  the environment.
+- **R0.** R0_ij comes from learned per-element radii.
+- **Switch.** S is a C2-smooth switch from 1 at 8 Å to 0 at 10 Å.
+- **What it covers.** The VV10 attraction that the 4.5 Å Stage 4 cannot see. The short
+  range is learned by Stage 4.
+- **Neighbour list.** A second list at 10 Å (vesin), built on every call.
+
+**Global conditioning.**
+- Total charge Q and spin multiplicity S are per-structure inputs.
+- An embedding of (Q, S) is added to every atom's Stage 2 input. This follows UMA.
+- Hydrocarbon training uses Q = 0, S = 1 only. The conditioning is present, exercised by
+  the gates and untrained.
 
 ## Readout
 
-- **Per-atom energy.** eps_i = MLP([h_i, H'_I, B_i, species, type]).
-- **Total energy.** E = Σ (eps_i + valence_i) · scale + Σ E0[Z]. E0 is stored as int64
-  micro-eV and the total is summed in float64, as in v1.
-- **Forces.** F = -dE/dr.
+- **Per-atom energy.** eps_i = MLP([h_i, H'_I, B_i, species embedding]).
+- **Total energy.**
+  - E = Σ_i (eps_i + valence_i) · scale + E_es + E_disp + Σ_i E0[Z_i].
+  - E0 is stored as int64 micro-eV and the total is summed in float64, as in v1.
+  - E0 is fitted by least squares per element on the training set. Elements absent from
+    the training set get E0 = 0, and the checkpoint records which ones are fitted.
+- **Forces.** F = -dE/dr by autodiff, through every term.
 
-## Data, split and training
+## Data and training (hackathon config)
 
-- **Pool.** Clean frames under the block rules.
-- **Grouping.** By system key (path with the `_Hterm` / `_frame` suffix removed).
-- **Subsample.** About 3 000 frames (about 540k atoms), drawn by system.
-- **PE frames.** All of v1's PE frames are included. v1's PE val and test systems stay in
-  v2's val and test splits.
-- **Split.** 80/10/10 by system.
-- **Training.** Same objective and optimiser as v1:
-  - 20 · per-atom E MSE + F MSE;
-  - AdamW, cosine schedule over wall clock, EMA 0.99;
-  - float32 training, float64 evaluation.
-  - Budget: 120 min.
-- **MACE.** Same settings as the v1 baseline, on the identical extxyz split. It is trained
-  concurrently; the GPU sharing is disclosed, as in v1.
+The data is selected by a config, so moving to the cluster changes only the config.
+
+**Hackathon config:**
+- **Elements.** {H, C} only.
+- **Frames.** Clean frames under the general block rules.
+- **Split.** By system key, after stripping the `_Hterm` and `_frame` suffixes.
+- **Size.** About 3 000 frames (about 540 k atoms) subsampled by system.
+- **PE overlap.** Every v1 PE frame is included. v1's PE val and test systems are forced
+  into v2's val and test splits.
+- **Proportions.** 80/10/10 by system.
+
+**Training:**
+- Loss: 20 · MSE(per-atom E) + MSE(F).
+- AdamW amsgrad, cosine schedule over wall clock, EMA 0.99.
+- float32 training, float64 evaluation.
+- Budget: 120 min.
+
+**MACE baseline:**
+- The same settings as for v1.
+- Trained on the identical extxyz split, at the same time. The GPU sharing is disclosed.
+
+**Cluster config (recorded, not run):**
+- **Data.** All of OPoly26, all elements, all charges and spins.
+- **Prerequisite.** The fetch script stores charge.
+- **Sampling.** Balanced across chemistry folders.
+- **Training.**
+  - Multi-GPU DDP, or the same loop with gradient accumulation.
+  - No architecture change.
 
 ## Code layout
 
-- **`topology.py`.** New `build_topology_general`, which builds:
-  - block = carbon, with its type;
-  - `block_atoms` padded to 4 slots (C plus up to 3 H), with a mask;
-  - C-C block edges (1-hop and 2-hop);
-  - the variant table.
+| Module | Contents |
+|---|---|
+| `src/frame_potential/v2/graph.py` | Bonds by covalent radii, the block rule, WL colours, the variant table, the block graph and valence pairs. Pure numpy and networkx. |
+| `src/frame_potential/v2/batch.py` | Collate (padded block atoms, variants, Q and S), the 4.5 Å and 10 Å neighbour lists. |
+| `src/frame_potential/v2/model.py` | `PolyFrameNetV2`: Stages 1-6. It reuses `mlp`, `gaussians` and `bessel_envelope` from v1. |
+| `src/frame_potential/v2/longrange.py` | Erf Coulomb for clusters, Ewald for periodic, and dispersion. |
+| `src/frame_potential/v2/data.py` | Config-driven loader and subsampler. |
+| `train.py` | `--arch v2`, plus `--data-config`. |
+| `calculator.py` | Picks the architecture from the checkpoint. |
 
-  The v1 PE path stays as it is, so v1 checkpoints still load.
-- **`model.py`.** v2 goes in a new module, `model_v2.py`, as `PolyFrameNetV2`. It reuses
-  `mlp`, `gaussians`, `bessel_envelope` and the moment code. v1 is untouched.
-- **`batch.py`.** Collate gains the variant table and per-block type.
-- **`data.py`.** Gains a hydrocarbon loader and a subsampler.
-- **`train.py`.** A `--model v2` flag.
-- **`calculator.py`.** Picks the model by checkpoint.
-- **Builders.** Gain a polystyrene chain (or a melt from OPoly26 frames tiled) for MD.
-
-## Gates (tests/test_gates_v2.py)
-
-Each gate runs on these test molecules:
-- an aromatic oligomer (styrene trimer);
-- a branched alkane (with a quaternary C);
-- a diene;
+Test molecules come from `builders`, or from small hand-written xyz files in
+`tests/data/`:
+- PS and PE chains;
+- PEO, nylon-6, PMMA, PVC, PTFE and PET fragments;
+- a periodic PE melt;
+- benzene;
 - methane;
-- a periodic PE melt.
+- Na+ Cl- (frame-free).
 
-The gates:
-- rotation + translation, reflection, permutation of all atoms, wrap: |ΔE| < 1e-9;
-- finite-difference forces: < 1e-8 eV/Å;
-- cutoff smoothness;
+v1 code is untouched.
+
+## Gates (tests/test_v2_gates.py; every test molecule unless noted)
+
+**Symmetry and smoothness:**
+- rotation + translation, reflection, permutation of all atoms, wrap: |ΔE| < 1e-9 eV;
+- finite-difference forces: < 1e-8 eV/Å. E0 is set to 0, as in v1;
+- cutoff smoothness at 4.5 Å and in the 8-10 Å dispersion switch.
+
+**Consistency:**
 - batch equals single;
 - calculator equals model;
 - float32 vs float64.
 
-Two further tests:
-- **A true oracle (closes the v1 gap).**
-  - Stage 1 claims that its variant set is closed under every symmetry.
-  - The test applies a random relabelling plus a rotation plus a mirror, rebuilds the
-    variant table, and checks the per-block multiset of variant features is identical
-    before and after.
-  - That checks the set itself, not just E.
-- **Negative control.** Drop one variant per block and assert the rotation or permutation
-  gate fails.
+**Stage 0 and Stage 1:**
+- **Bonds.** On every v1 PE frame, the covalent-radius bonds equal v1's bonds.
+- **Variant-set oracle (true oracle).** Apply a random permutation + rotation + mirror.
+  Rebuild everything from scratch. For each block, the multiset of per-variant Stage 2
+  inputs must equal the original (matched after sorting, to 1e-9).
+- **Negative control.** Drop one variant per block. The rotation or permutation gate must
+  then fail.
 
-## Risks
+**Stage 5:**
+- **Cluster Coulomb.** Erf Coulomb on a 2-charge cluster equals the analytic value.
+- **Ewald, two checks.**
+  - It converges as the box grows: the cluster limit matches.
+  - It is independent of α at fixed accuracy.
+- **Charge conservation.** Σ q_i = Q to 1e-10, for Q ∈ {-1, 0, +1}.
+- **Frame-free blocks.** Na+ Cl- gives finite E and F, and passes every symmetry gate.
 
-- **Cost.** Mean variants per atom is about 10, against 4 in v1. Stage 3 and Stage 4 cost
-  scales with it. If speed falls below MACE at 1k atoms, average B before the products
-  for the cheap channels and keep products only for a few channels.
-- **Data imbalance.** Aromatic carbons dominate. PE accuracy may drop. That is measured
-  by success criterion 3.
-- **Time.** If training or the gates slip, cut the polystyrene MD before the PE
-  comparison.
+## Build order
+
+1. graph.py, with the bond, block, colour and variant gates.
+2. Model Stages 1-4 and the readout, with the symmetry gates on all molecules.
+3. Stage 5 and the long-range gates.
+4. Data loader and a smoke train.
+5. Full training of v2 and MACE, run together.
+6. Benchmarks and writeup.
+
+Commit after each step.
+
+## Risks and fallbacks (deadline-driven, ordered)
+
+| Risk | Fallback |
+|---|---|
+| Ewald slips | Ship Coulomb for clusters only, and disable E_es for periodic systems, with an explicit error flag. Training data is clusters, so the hackathon numbers are unaffected. Disclosed. |
+| Too slow at 1k atoms because of variant counts | Average B over v before the products for most channels. |
+| Variable-block encoder too slow | Bucket blocks by size and run one encoder call per bucket. |
+| Data imbalance (aromatics dominate), PE accuracy falls | Measured by criterion 3. Report it; do not hide it. |
+| Overall time | Cut PS MD first, then the dispersion tail. Without it, nothing models attraction beyond 4.5 Å; that matters for bulk density, but little for the cluster energies in the training data. Disclosed if cut. |
