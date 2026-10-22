@@ -40,7 +40,7 @@ def label_end(ax, x, y, text, color):
 
 def main(runs: pathlib.Path, out: pathlib.Path):
     out.mkdir(parents=True, exist_ok=True)
-    hist = json.loads((runs / "pfn_final" / "history.json").read_text())
+    hist = json.loads((runs / "pfn_o3" / "history.json").read_text())
     mc = mace_curve(runs / "mace_main.log")
 
     fig, axes = plt.subplots(1, 2, figsize=(9, 3.4))
@@ -59,34 +59,68 @@ def main(runs: pathlib.Path, out: pathlib.Path):
     fig.tight_layout()
     fig.savefig(out / "learning_curves.png", dpi=160)
 
-    md = runs / "md" / "md_bench.json"
+    md = runs / "md2"
     if md.exists():
-        r = json.loads(md.read_text())
         fig, ax = plt.subplots(figsize=(4.8, 3.4))
-        n = [s["n_atoms"] for s in r["speed"]]
-        for k, c, name in (("ours_s", OURS, "PolyFrameNet"), ("mace_s", MACE, "MACE")):
-            pts = [(a, s[k] * 1000) for a, s in zip(n, r["speed"], strict=True) if s[k]]
-            ax.plot([p[0] for p in pts], [p[1] for p in pts], "-o", color=c, ms=5)
+        for k, c, name in (("ours", OURS, "PolyFrameNet"), ("mace", MACE, "MACE")):
+            rows = [json.loads(f.read_text()) for f in sorted(md.glob(f"speed_{k}_r*.json"))]
+            pts = sorted((r["n_atoms"], r["s_per_step"] * 1000) for r in rows if r["s_per_step"])
+            if not pts:
+                continue
+            ax.plot([q[0] for q in pts], [q[1] for q in pts], "-o", color=c, ms=5)
             label_end(ax, pts[-1][0], pts[-1][1], name, c)
+            # The laptop GPU has 12 GB; above that the driver pages into system RAM.
+            for r in rows:
+                if r["s_per_step"] and r.get("peak_gpu_GB", 0) > 12:
+                    ax.annotate(f"peak {r['peak_gpu_GB']:.1f} GB (12 GB card)",
+                                (r["n_atoms"], r["s_per_step"] * 1000), xytext=(-8, 8),
+                                textcoords="offset points", ha="right", fontsize=8,
+                                color=INK2)
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlabel("atoms (periodic PE melt)")
-        ax.set_title("Energy + forces per MD step (ms, RTX 4080 Laptop)", loc="left",
-                     fontsize=10)
+        ax.set_title("Energy + forces per MD step (ms)", loc="left", fontsize=10)
         fig.tight_layout()
         fig.savefig(out / "speed.png", dpi=160)
 
         fig, ax = plt.subplots(figsize=(6, 3.2))
-        for k, c, name in (("ours", OURS, "PolyFrameNet"), ("mace", MACE, "MACE")):
-            tr = r["nve"][k]
+        # MACE float32 sums ~-3.4e5 eV in float32, which quantises the total energy; the
+        # float64 run is the like-for-like comparison, float32 is kept faint for reference.
+        for k, c, name, alpha in (("mace", MACE, "MACE float32", 0.3),
+                                  ("mace_f64", MACE, "MACE float64", 1.0),
+                                  ("ours", OURS, "PolyFrameNet float32", 1.0)):
+            f = md / f"nve_{k}.json"
+            if not f.exists():
+                continue
+            tr = json.loads(f.read_text())
             e0 = tr["trace_e_eV_atom"][0]
             y = [(e - e0) * 1000 for e in tr["trace_e_eV_atom"]]
-            ax.plot(tr["trace_t_ps"], y, color=c, lw=1.5)
-            label_end(ax, tr["trace_t_ps"][-1], y[-1], name, c)
+            ax.plot(tr["trace_t_ps"], y, color=c, lw=1.2, alpha=alpha, label=name)
+        ax.legend(frameon=False, fontsize=8, loc="upper right")
         ax.set_xlabel("time (ps)")
-        ax.set_title("NVE total energy drift, 450 K start (meV/atom)", loc="left", fontsize=10)
+        ax.set_title("NVE total energy minus initial (meV/atom), 976 atoms", loc="left",
+                     fontsize=10)
         fig.tight_layout()
         fig.savefig(out / "nve.png", dpi=160)
+
+        fig, ax = plt.subplots(figsize=(6, 3.2))
+        for k, c, name in (("ours", OURS, "PolyFrameNet"), ("mace", MACE, "MACE")):
+            f = md / f"nvt_{k}.json"
+            if not f.exists():
+                continue
+            r = json.loads(f.read_text())
+            e = r["rdf_edges"]
+            mid = [(e[i] + e[i + 1]) / 2 for i in range(len(e) - 1)]
+            norm = [cnt / (mid[i] ** 2) for i, cnt in enumerate(r["rdf_counts"])]
+            tail = sum(norm[-10:]) / 10
+            g = [x / tail for x in norm]
+            ax.plot(mid, g, color=c, lw=1.5, label=name)
+        ax.legend(frameon=False, fontsize=9, loc="lower right")
+        ax.set_xlabel("r (Å)")
+        ax.set_title("Intermolecular C-C g(r), NVT 450 K (normalised to tail)", loc="left",
+                     fontsize=10)
+        fig.tight_layout()
+        fig.savefig(out / "rdf.png", dpi=160)
 
 
 if __name__ == "__main__":

@@ -179,55 +179,57 @@ def nvt_observables(calc, atoms, steps, dt_fs=0.5, T=450.0, seed=0, every=20):
     }
 
 
+def make_calc(model, ours_path, mace_path, dtype="float32"):
+    if model == "ours":
+        return PolyFrameNetCalculator(load_model(ours_path, "cuda", getattr(torch, dtype)), "cuda")
+    from mace.calculators import MACECalculator
+
+    return MACECalculator(model_paths=str(mace_path), device="cuda", default_dtype=dtype)
+
+
 def main():
+    """One model, one task per process: a CUDA OOM poisons the whole context, so a failure
+    in one measurement must not take the others down with it."""
     p = argparse.ArgumentParser()
+    p.add_argument("--model", choices=["ours", "mace"], required=True)
+    p.add_argument("--task", choices=["speed", "nve", "nvt"], required=True)
+    p.add_argument("--reps", type=int, default=1, help="speed: tile the 976-atom box reps^3")
     p.add_argument("--ours", type=pathlib.Path, required=True)
     p.add_argument("--mace", type=pathlib.Path, required=True)
     p.add_argument("--out", type=pathlib.Path, required=True)
-    p.add_argument("--nve-steps", type=int, default=4000)
+    p.add_argument("--steps", type=int, default=4000)
     p.add_argument("--dt", type=float, default=0.5)
-    p.add_argument("--nvt-steps", type=int, default=4000)
+    p.add_argument("--dtype", choices=["float32", "float64"], default="float32",
+                   help="float64 for MACE NVE: its float32 energy sum is quantised (see writeup)")
     a = p.parse_args()
-    from mace.calculators import MACECalculator
-
-    ours = PolyFrameNetCalculator(load_model(a.ours, "cuda", torch.float32), "cuda")
-    mace = MACECalculator(model_paths=str(a.mace), device="cuda", default_dtype="float32")
-    res = {"speed": [], "nve": {}}
-    base = melt_atoms(8, 40, 0.50, seed=1)
-    for reps in (1, 2, 3):
-        z, p, c = tile(base.numbers, base.positions, np.asarray(base.cell), reps)
-        atoms = Atoms(numbers=z, positions=p, cell=c, pbc=True)
-        ours.topo = None
-        row = {"n_atoms": len(atoms), "ours_s": time_calc(ours, atoms),
-               "ours_nl_s": time_neighbor_list(atoms, ours.model.cutoff)}
-        try:
-            row["mace_s"] = time_calc(mace, atoms)
-        except RuntimeError as exc:  # OOM at large N
-            row["mace_s"] = None
-            print("mace failed", exc)
-            torch.cuda.empty_cache()
-        for k in ("ours", "mace"):
-            s = row[f"{k}_s"]
-            row[f"{k}_ns_day_1fs"] = None if s is None else 86400 / s * 1e-6
-        print(row, flush=True)
-        res["speed"].append(row)
-    atoms = melt_atoms(8, 40, 0.50, seed=2)
-    for name, calc in (("ours", ours), ("mace", mace)):
-        if name == "ours":
-            ours.topo = None
-        r = nve(calc, atoms, a.nve_steps, a.dt)
-        summary = {k: v for k, v in r.items() if not k.startswith(("trace", "final"))}
-        print(name, summary, flush=True)
-        res["nve"][name] = r
-    res["nvt"] = {}
-    for name, calc in (("ours", ours), ("mace", mace)):
-        if name == "ours":
-            ours.topo = None
-        r = nvt_observables(calc, atoms, a.nvt_steps)
-        print(name, {k: v for k, v in r.items() if not k.startswith("rdf")}, flush=True)
-        res["nvt"][name] = r
+    calc = make_calc(a.model, a.ours, a.mace, a.dtype)
     a.out.mkdir(parents=True, exist_ok=True)
-    (a.out / "md_bench.json").write_text(json.dumps(res))
+    if a.task == "speed":
+        base = melt_atoms(8, 40, 0.50, seed=1)
+        z, pos, c = tile(base.numbers, base.positions, np.asarray(base.cell), a.reps)
+        atoms = Atoms(numbers=z, positions=pos, cell=c, pbc=True)
+        row = {"model": a.model, "n_atoms": len(atoms)}
+        torch.cuda.reset_peak_memory_stats()
+        try:
+            row["s_per_step"] = time_calc(calc, atoms)
+            row["ns_day_1fs"] = 86400 / row["s_per_step"] * 1e-6
+        except Exception as exc:  # OOM at large N
+            row["s_per_step"] = None
+            row["error"] = str(exc).splitlines()[0][:200]
+        row["peak_gpu_GB"] = torch.cuda.max_memory_allocated() / 1e9
+        if a.model == "ours" and row["s_per_step"]:
+            row["nl_s"] = time_neighbor_list(atoms, calc.model.cutoff)
+        result = row
+    else:
+        atoms = melt_atoms(8, 40, 0.50, seed=2)
+        if a.task == "nve":
+            result = nve(calc, atoms, a.steps, a.dt)
+        else:
+            result = nvt_observables(calc, atoms, a.steps, a.dt)
+    print({k: v for k, v in result.items() if not k.startswith(("trace", "final", "rdf"))})
+    name = (f"{a.task}_{a.model}" + (f"_r{a.reps}" if a.task == "speed" else "")
+            + ("_f64" if a.dtype == "float64" else "") + ".json")
+    (a.out / name).write_text(json.dumps(result))
 
 
 if __name__ == "__main__":

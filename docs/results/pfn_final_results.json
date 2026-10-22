@@ -1,0 +1,35 @@
+{
+ "val": {
+  "e_mae_meV_atom": 0.37622300045801554,
+  "e_rmse_meV_atom": 0.4932702446521755,
+  "e_mae_meV": 47.55396536978272,
+  "f_mae_meV_A": 14.889052843337902,
+  "f_rmse_meV_A": 22.32989449977429,
+  "n_frames": 60
+ },
+ "test": {
+  "e_mae_meV_atom": 0.3265248022144712,
+  "e_rmse_meV_atom": 0.4135128481282233,
+  "e_mae_meV": 42.36879167407781,
+  "f_mae_meV_A": 13.70521808220635,
+  "f_rmse_meV_A": 20.8380437470897,
+  "n_frames": 77
+ },
+ "n_params": 656274,
+ "args": {
+  "raw": "C:\\Users\\sumedh\\polyframenet_data\\opoly26_ch",
+  "out": "C:\\Users\\sumedh\\polyframenet_data\\runs\\pfn_o3",
+  "minutes": "90.0",
+  "max_epochs": "10000",
+  "lr": "0.005",
+  "max_atoms": "1000",
+  "w_energy": "20.0",
+  "w_forces": "1.0",
+  "ema": "0.99",
+  "cutoff": "4.5",
+  "n_bonded": "2",
+  "exclude_hops": "-1",
+  "hidden": "128",
+  "seed": "0"
+ }
+}
