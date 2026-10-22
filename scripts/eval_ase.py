@@ -43,6 +43,10 @@ if __name__ == "__main__":
     for at in read(split, ":"):
         e_ref, f_ref = at.info["REF_energy"], at.arrays["REF_forces"]
         at.info["charge"], at.info["spin"] = 0, 1  # UMA omol inputs; ignored by others
+        if hasattr(calc, "topo"):
+            # Our calculators read topology once per system (right for MD). Distinct
+            # frames can share an atom list but not bonding: rebuild it every frame.
+            calc.topo = None
         at.calc = calc
         e_err.append((at.get_potential_energy() - e_ref) / len(at))
         f_err.append((at.get_forces() - f_ref).ravel())
