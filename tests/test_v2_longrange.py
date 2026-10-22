@@ -2,7 +2,6 @@ import math
 
 import numpy as np
 import torch
-from v2_molecules import g2, ion_pair
 
 from frame_potential.batch import radius_graph
 from frame_potential.v2.batch import collate_v2
@@ -14,6 +13,7 @@ from frame_potential.v2.longrange import (
     neutralize,
     switch,
 )
+from v2_molecules import g2, ion_pair
 
 
 def _batch(z, p, cell=None, charge=0.0):
