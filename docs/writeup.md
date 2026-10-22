@@ -16,18 +16,19 @@ with the same split, reference energies and loss weights, on one laptop GPU (RTX
 | Test force MAE (meV/Å) | **13.71** | 13.73 |
 | Test force RMSE (meV/Å) | 20.8 | **19.6** |
 | Parameters | 656 k | 213 k |
-| Time per MD step, 976 atoms | **48 ms** | 112 ms |
-| Time per MD step, 7 808 atoms | **69 ms** | 5 950 ms |
+| Energy + forces per call, 976 atoms | **48 ms** | 112 ms |
+| Energy + forces per call, 7 808 atoms | **69 ms** | 5 946 ms |
 | Peak GPU memory, 7 808 atoms | **1.1 GB** | 12.4 GB |
 | NVE, 3 ps: drift (meV/atom/ps) | 0.0003 | see §4.5 |
 
-* **Accuracy: a tie.** Forces are equal to within 0.2%. MACE's energy is 15% better.
+* **Accuracy: a tie.** Forces are equal to within 0.2%. MACE's energy MAE is 14% lower.
 * **Speed and memory: PolyFrameNet wins.** It is 2.3× faster at 1k atoms. At 8k atoms
-  MACE outgrows the 12 GB card, pages into system RAM, and is 86× slower. PolyFrameNet runs
+  MACE outgrows the 12 GB card, slows to paging speed (memory allocated 12.4 GB), and is 87× slower. PolyFrameNet runs
   26k atoms in 3.5 GB.
 * **Stability.** Both models run stable NVE and NVT, and they agree on the melt structure.
-* **Correctness.** All 23 gates pass: rotation, reflection, permutation, wrap,
-  finite-difference forces, cutoff smoothness and the automorphism oracle.
+* **Correctness.** All 21 correctness gates pass: rotation, reflection, permutation, wrap,
+  finite-difference forces and cutoff smoothness. The Stage 2 group average is exact by
+  construction, but no test yet checks it against an independently built oracle.
 * **The most useful negative result.** The spec's exclusion rule hides intra-chain pairs
   within L_b block hops from the non-bonded channel. In 8-minute runs it made test force
   error 3.4× worse, so the final model keeps every pair (§4.3).
@@ -143,7 +144,9 @@ feature H_I (128).
 * **How the average works.** The MLP runs on every relabelled input, in one batched call.
   Per-atom outputs are permuted back to their atoms, then everything is averaged.
 * **Why it is exact.** The result is invariant to any relabelling by construction. It is
-  the spec's 8-pass "automorphism oracle", used as the actual forward pass.
+  the spec's "automorphism oracle" (average over the group), used as the actual forward
+  pass. Note: no test builds that average independently and compares; the gates check
+  the resulting invariance (§5).
 
 ### Stage 3: bonded channel (`BondedLayer`, 2 layers)
 
@@ -169,7 +172,7 @@ A learnable function f_class(r) of every topological 1-2, 1-3 and 1-4 distance. 
 * **Energy split:** half of each pair energy goes to each atom.
 * **What it is:** a learnable Urey-Bradley force field. It was added after diagnosis
   (§4): stiff bond and angle terms are one-dimensional functions, and the optimiser finds
-  them at once, instead of having to dig them out of a 168-dimensional block MLP.
+  them at once, instead of having to dig them out of the block MLP (186 inputs for a mid block, 245 for an end block).
 
 ### Stage 4: non-bonded channel (`NonBonded`, one pass)
 
@@ -187,7 +190,7 @@ M0_c = Σ_j φ_ij,c      M1_c = Σ_j φ_ij,c r̂_ij      M2_c = Σ_j φ_ij,c r̂
 **Projection.** The moments are projected into the frame of the atom's own block:
 F^T M1 and F^T M2 F (6 unique entries). This gives A_i, with 16 channels × 10 = 160
 invariants. Because the moments are global and only the projection is per atom, averaging
-over the two frame variants costs per atom, not per edge.
+over the four frame variants costs per atom, not per edge.
 
 **Body order** comes from products of linear mixes:
 
@@ -275,7 +278,7 @@ model selection.
 | Force RMSE (meV/Å) | 20.84 | 19.65 |
 
 For scale: the force RMS of the data is 706 meV/Å, so both models get forces right to
-about 2%.
+about 2% (MAE) or 3% (RMSE).
 
 **Training setups.** These are equal in data, not in compute.
 
@@ -302,7 +305,7 @@ validation force MAE.
   * *Change:* added the learnable 1-2 / 1-3 / 1-4 terms.
   * *Effect:* validation force MAE fell from about 340 to 121 meV/Å at the same budget.
   * *Why it was needed:* without the prior, bond stretching and angle bending, the largest
-    forces in the system, had to be learned through the 168-input block MLP. The prior gives
+    forces in the system, had to be learned through the block MLP (186-245 inputs). The prior gives
     each of them its own one-dimensional function.
 * **Small batches.** At the same learning rate, after 10 epochs:
   * 1000-atom batches: 144 meV/Å;
@@ -363,8 +366,10 @@ atoms.
 
 ![speed](figures/speed.png)
 
-* **MACE above 8k atoms.** The peak memory exceeds the 12 GB card, and the Windows driver
-  pages into system RAM. Those MACE times measure paging, not compute. On a larger GPU MACE
+* **MACE above 8k atoms.** At 7 808 atoms the peak allocation (12.35 GB, plus CUDA context)
+  fills the 12 GB card; at 26k atoms it is 41.6 GB, and the Windows driver pages into
+  system RAM. The 54× jump from 976 to 7 808 atoms (8× more atoms) is the signature of
+  paging. Those MACE times measure paging, not compute. On a larger GPU MACE
   would scale roughly linearly from its 976-atom point (about 0.9 s at 8k atoms). Even so,
   memory is the real constraint: MACE needs about 1.6 MB per atom, PolyFrameNet about
   0.13 MB.
@@ -372,7 +377,7 @@ atoms.
   GPU is mostly idle, waiting on Python and kernel launches, so CUDA graphs or
   `torch.compile` would help most at small N.
 * **The neighbour list is not the bottleneck.** vesin builds it in 1.1 ms at 976 atoms and
-  7.2 ms at 26k atoms: 2-4% of a step.
+  7.2 ms at 26k atoms: 2-5% of a step.
 * **Caveats.**
   * MACE ran without cuEquivariance, which was not installed. It can give MACE several-fold
     speedups.
@@ -385,7 +390,10 @@ atoms.
 ### 4.5 NVE energy conservation
 
 **Setup.** 976-atom melt, Maxwell-Boltzmann velocities at 450 K, velocity Verlet with
-dt = 0.5 fs, 6000 steps = 3 ps (`--task nve`). The figure shows the total energy relative to
+dt = 0.5 fs, 6000 steps = 3 ps (`--task nve`). Mean temperature settles near 254 K, not
+450 K: the builder places chains with ideal bond lengths and angles (near the bonded
+minimum), so kinetic energy flows into
+potential energy (equipartition). The figure shows the total energy relative to
 its starting value.
 
 | | Drift (meV/atom/ps) | Std of E_total (meV/atom) | Wall time |
@@ -456,22 +464,23 @@ construction intends.
 
 ## 5. Correctness gates
 
-`pytest` runs all 23 in float64 (`tests/test_gates.py`). They run on an untrained,
+`pytest` runs 23 tests in float64: 21 gates in `tests/test_gates.py` plus 2 smoke tests. They run on an untrained,
 randomly initialised model, where a symmetry bug cannot hide behind training.
 
-Energies are in eV, absolute.
+Energies are in eV, absolute. Finite-difference gates use the model with E0 = 0, so the
+-1037 eV/atom offsets do not swamp float64 differences.
 
 | Gate | Pass condition |
 |---|---|
 | Topology: block decomposition, end and mid types, every atom in one block | exact |
-| Radius graph: vesin vs 27-image brute force (periodic, cluster, multi-structure batch) | identical edge sets, no cross-structure edges |
+| Radius graph: vesin vs 27-image brute force (periodic, cluster, multi-structure batch) | identical (i, j, shift) sets for periodic, (i, j) for clusters; no cross-structure edges |
 | Rotation + translation (cluster, periodic; spec and all-pairs models) | \|ΔE\| < 1e-9 |
 | Hydrogen permutation within blocks (cluster, periodic) | \|ΔE\| < 1e-9 |
 | Wrapping atoms back into the box | \|ΔE\| < 1e-9 |
 | Reflection (cluster, periodic) | \|ΔE\| < 1e-9 |
 | Autodiff forces vs central finite differences, h = 1e-5 (cluster, periodic, all-pairs) | max error < 1e-8 eV/Å |
-| Cutoff smoothness: slide one chain away from another | no jump in E or its derivative; E exactly constant beyond the cutoff |
-| Automorphism oracle: E equals the brute-force average over relabellings | \|ΔE\| < 1e-9 |
+| Cutoff smoothness (spec-default model): slide one chain away from another | finite-difference second derivative < 0.2 × first (no kinks); E exactly constant beyond the cutoff |
+| Average of E over 8 random atom relabellings equals E (named "oracle" in the code; really a second invariance check, since a true oracle would build the group average independently) | \|ΔE\| < 1e-9 |
 | Negative control: the checkers flag deliberately broken energies | error > 1e-3 |
 | float32 model vs float64 model, output dtype float64 | \|ΔE\| < 1e-4 · sqrt(N) |
 | Butane, the shortest allowed chain (2 end blocks, no mid) | finite energy |

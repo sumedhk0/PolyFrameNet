@@ -163,9 +163,10 @@ def test_checkers_catch_broken_energy(cluster, rng):
 
 
 def test_automorphism_oracle(model, cluster, rng):
-    """Brute-force average over explicit relabellings (H swaps + chain reversal) equals the
-    fast path: the fast path is already invariant, so the average of identical numbers is
-    that number. Paired with test_checkers_catch_broken_energy as the negative control."""
+    """Average of E over 8 random atom relabellings equals E. Weak by construction: if the
+    model is invariant, the 8 energies are identical, so this is a second permutation check,
+    not an independent oracle. A true oracle would rebuild the Stage 2 group average by hand
+    and compare it to BlockEncoder's batched average; that test does not exist yet."""
     z, p = cluster
     f = gates.make_energy_fn(model)
     e = f(z, p)
