@@ -130,3 +130,19 @@ def test_rejections():
     p = np.stack([6.0 * np.cos(ang), 6.0 * np.sin(ang), np.zeros(40)], 1)  # 0.94 A apart
     with pytest.raises(TopologyError):
         topology_from_geometry_v2(np.full(40, 6), p)
+
+
+def test_collate_offsets():
+    from frame_potential.v2.batch import collate_v2
+
+    z1, p1 = g2("C6H6")
+    z2, p2 = pe_chain(6)
+    t1, t2 = topology_from_geometry_v2(z1, p1), topology_from_geometry_v2(z2, p2)
+    b = collate_v2([t1, t2], [p1, p2])
+    assert b.n_atoms == t1.n_atoms + t2.n_atoms and b.n_blocks == t1.n_blocks + t2.n_blocks
+    nb1, nv1 = t1.n_blocks, len(t1.var_block)
+    assert int(b.var_block[nv1]) == nb1  # second structure's first variant -> its block 0
+    assert int(b.var_cab[nv1, 0]) == int(t2.var_cab[0, 0]) + t1.n_atoms
+    assert int(b.ev_var.max()) < len(b.var_block) and int(b.av_atom.max()) == b.n_atoms - 1
+    assert b.block_atoms.shape[1] == max(t1.block_atoms.shape[1], t2.block_atoms.shape[1])
+    assert b.charge.tolist() == [0.0, 0.0] and b.spin.tolist() == [1.0, 1.0]
