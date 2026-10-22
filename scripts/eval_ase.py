@@ -1,6 +1,6 @@
 """Accuracy of any ASE calculator on an extxyz split with REF_energy / REF_forces.
 Usage: python scripts/eval_ase.py <kind> <model> <split.xyz> <out.json>
-kind: v2 | mace | allegro | deepmd | uma. Runs inside that model's own environment."""
+kind: v1 | v2 | mace | allegro | deepmd | uma. Runs inside that model's own environment."""
 
 import json
 import sys
@@ -18,6 +18,12 @@ def make_calc(kind, model, dtype="float64"):
         from frame_potential.v2.train import load_model_v2
         return PolyFrameNetV2Calculator(load_model_v2(model, "cuda"), "cuda",
                                         getattr(torch, dtype))
+    if kind == "v1":
+        import torch
+
+        from frame_potential.calculator import PolyFrameNetCalculator
+        from frame_potential.train import load_model
+        return PolyFrameNetCalculator(load_model(model, "cuda"), "cuda", getattr(torch, dtype))
     if kind == "mace":
         from mace.calculators import MACECalculator
         return MACECalculator(model_paths=model, device="cuda", default_dtype=dtype)
